@@ -1,0 +1,77 @@
+# --- Secrets & environment ---
+.env
+.env.*
+!.env.example
+
+# --- Local / tenant config (copy from *.example) ---
+config/zendesk_field_map.json
+config/cxone_zendesk_link.json
+
+# --- Python ---
+.venv/
+venv/
+env/
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg
+*.egg-info/
+.eggs/
+dist/
+build/
+pip-wheel-metadata/
+*.manifest
+*.spec
+
+# Test / type / lint caches
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+.nox/
+hypothesis/
+
+# --- Pipeline outputs & data extracts ---
+output/
+*.jsonl
+*.csv
+*.parquet
+
+# --- Logs & temp ---
+*.log
+logs/
+tmp/
+temp/
+*.tmp
+*.bak
+*.swp
+*~
+
+# --- Docker (local volumes / overrides) ---
+docker-compose.override.yml
+.docker/
+
+# --- OS ---
+.DS_Store
+Thumbs.db
+Desktop.ini
+ehthumbs.db
+
+# --- Editors / IDE ---
+.idea/
+.vscode/
+*.sublime-project
+*.sublime-workspace
+
+# --- Cursor (local workspace state; keep rules/skills elsewhere if desired) ---
+.cursor/
+
+# --- Database dumps ---
+*.sql.gz
+*.dump
+backups/

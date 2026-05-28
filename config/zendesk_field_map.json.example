@@ -1,0 +1,104 @@
+{ 
+  "promoted_fields": [
+    {
+      "field_id": 45272326346644,
+      "column": "cf_account_number",
+      "title": "Account Number"
+    },
+    {
+      "field_id": 42054403686036,
+      "column": "cf_call_object_identifier",
+      "title": "Call Object Identifier"
+    },
+    {
+      "field_id": 40430376292372,
+      "column": "cf_disposition",
+      "title": "Disposition"
+    },
+    {
+      "field_id": 42566711884948,
+      "column": "cf_disposition_dealer",
+      "title": "Disposition (Dealer)"
+    },
+    {
+      "field_id": 42566810627732,
+      "column": "cf_disposition_consumer",
+      "title": "Disposition (Consumer)"
+    },
+    {
+      "field_id": 46640971723924,
+      "column": "cf_disposition_consumer_levolor",
+      "title": "Disposition (Consumer) Levolor"
+    },
+    {
+      "field_id": 46121634123028,
+      "column": "cf_disposition_customer_levolor",
+      "title": "Disposition (Customer) Levolor"
+    },
+    {
+      "field_id": 45895665384212,
+      "column": "cf_i_need_help_with",
+      "title": "I need help with"
+    },
+    {
+      "field_id": 42472240259348,
+      "column": "cf_intent",
+      "title": "Intent?"
+    },
+    {
+      "field_id": 42054404282516,
+      "column": "cf_master_call_identifier",
+      "title": "Master Call Identifier"
+    },
+    {
+      "field_id": 42331571579668,
+      "column": "cf_parent_ticket",
+      "title": "Parent Ticket"
+    },
+    {
+      "field_id": 43992434769812,
+      "column": "cf_po_number",
+      "title": "PO Number"
+    },
+    {
+      "field_id": 40945545015956,
+      "column": "cf_product_order_ids",
+      "title": "Product Order IDs"
+    },
+    {
+      "field_id": 42565808136596,
+      "column": "cf_reason_for_contact_installerdealer",
+      "title": "Reason for contact (Installer/Dealer)"
+    },
+    {
+      "field_id": 42566739338004,
+      "column": "cf_reason_for_contact_consumer",
+      "title": "Reason for contact (Consumer)"
+    },
+    {
+      "field_id": 46121643742996,
+      "column": "cf_reason_for_contact_customer_levolor",
+      "title": "Reason for contact - Customer (Levolor)"
+    },
+    {
+      "field_id": 49160627385492,
+      "column": "cf_sales_area",
+      "title": "Sales Area"
+    },
+    {
+      "field_id": 42472225503508,
+      "column": "cf_sentiment",
+      "title": "Sentiment"
+    },
+    {
+      "field_id": 42472193770900,
+      "column": "cf_summary",
+      "title": "Summary"
+    },
+    {
+      "field_id": 48214350403860,
+      "column": "cf_total_time_spent_sec",
+      "title": "Total time spent (sec)"
+    }
+  ]
+}

@@ -1,0 +1,22 @@
+{
+  "parent_ticket_resolution": {
+    "enabled": true,
+    "cxone_fields": ["contact_id", "contact_no", "segment_contact_id"],
+    "zendesk_call_object_column": "cf_call_object_identifier",
+    "zendesk_parent_ticket_column": "cf_parent_ticket",
+    "require_parent_ticket_field": true,
+    "phone_call_form_ids": []
+  },
+  "fallback_strategies": [
+    {
+      "name": "ticket_id",
+      "cxone_fields": ["ticket_id"],
+      "zendesk_source": "ticket_id"
+    },
+    {
+      "name": "master_call_identifier",
+      "cxone_fields": ["acd_contact_id", "acd_session_id", "segment_contact_id"],
+      "zendesk_column": "cf_master_call_identifier"
+    }
+  ]
+}
