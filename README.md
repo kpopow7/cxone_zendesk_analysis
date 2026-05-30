@@ -10,6 +10,7 @@ Step-by-step pipeline to extract contact-center data from multiple systems, stor
 | **2** | Zendesk Support | `zendesk_tickets` | Ticket `created_at` | `run_zendesk_extract.py`, `probe_zendesk.py` |
 | **3** | CXone + Zendesk (linked) | `combined_interactions` | CXone `interaction_start` (optional filter) | `run_build_combined_dataset.py` |
 | **4** | Combined interactions | (report output) | `interaction_start` presets or custom range | `run_interaction_summary.py` |
+| **Daily** | All three load steps | Yesterday (configurable TZ) | `run_daily_pipeline.py` ([schedule guide](docs/DAILY_SCHEDULE.md)) |
 
 Both steps use the **same PostgreSQL database** (`DATABASE_URL` in `.env`).
 
@@ -60,6 +61,9 @@ scripts/
   run_zendesk_extract.py           # Step 2 CLI
   run_build_combined_dataset.py    # Step 3 CLI
   run_interaction_summary.py       # Step 4 CLI
+  run_daily_pipeline.py            # Daily CXone + Zendesk + combined (all-in-one)
+  run_daily_pipeline.ps1           # Windows runner with logging
+  register_daily_task.ps1          # Register Windows Task Scheduler job
   list_call_selection_values.py    # List skills/teams for filter config
   cxone_zendesk_link.json.example  # Step 3 link rules
   interaction_summary.json.example # Step 4 analysis config
@@ -73,6 +77,7 @@ chatbot/
   Dockerfile                       # Railway deploy
 docs/
   CHATBOT_RAILWAY.md               # Railway DB + chatbot setup
+  DAILY_SCHEDULE.md                # Schedule daily extracts + combined update
 ```
 
 ---
@@ -482,10 +487,9 @@ WHERE link_method = 'call_object_to_parent';
 
 ### Recommended pipeline order
 
-1. `run_cxone_historical_backfill.py` (once) + `run_cxone_extract.py` (daily)
-2. `run_zendesk_extract.py` (ticket range covering your calls)
-3. `run_build_combined_dataset.py --rebuild` (then incremental by `--interaction-start` / `--interaction-end` after daily extracts)
-4. `run_interaction_summary.py` (top call reasons + recommendations for a time window)
+1. **One-time:** `run_cxone_historical_backfill.py` + `run_zendesk_extract.py` (full range) + `run_build_combined_dataset.py --rebuild`
+2. **Daily:** `run_daily_pipeline.py` or scheduled task ([docs/DAILY_SCHEDULE.md](docs/DAILY_SCHEDULE.md))
+3. **Optional:** `run_interaction_summary.py` or Railway chatbot for ad-hoc / NL questions
 
 ---
 
