@@ -1,0 +1,30 @@
+{
+  "fallback_humanize": true,
+  "labels": {
+    "dispdealer__ordersupport_product_info": "Dealer: Order support - product information",
+    "dispdealer_ordersupport_order_processed": "Dealer: Order support - order processed",
+    "dispconlev_product_info": "Levolor consumer: Product information",
+    "dispdealer_ts_repairremake_remake_ordered": "Dealer: Technical support - remake ordered",
+    "dispdealer__ordersupport_order_info": "Dealer: Order support - order information",
+    "levdispdealer_ordersupport_order_status": "Levolor dealer: Order support - order status",
+    "dispdealer__ordersupport_order_status": "Dealer: Order support - order status",
+    "dispconlev_remake": "Levolor consumer: Remake",
+    "dispcon_repserv_referred_dealer": "Consumer: Repair service - referred to dealer",
+    "dispdealer_ts_repairremake_parts_order": "Dealer: Technical support - parts order",
+    "dispdealer_system_general_support": "Dealer: System / general support",
+    "dispcon_product_info": "Consumer: Product information",
+    "levdispdealer_ordersupport_product_info": "Levolor dealer: Order support - product information",
+    "levdispdealer_ordersupport_order_info": "Levolor dealer: Order support - order information",
+    "dispdealer_other": "Dealer: Other",
+    "dispdealer__ordersupport_changed_cancelled": "Dealer: Order support - changed / cancelled",
+    "dispcon_repserv_sent_parts": "Consumer: Repair service - parts sent",
+    "dispconlev_repserv_toubleshooting_provided": "Levolor consumer: Repair service - troubleshooting provided",
+    "dispdealer_svc_ord_inquiry_service_status": "Dealer: Service order inquiry - status",
+    "levdispdealer_ordersupport_order_processed": "Levolor dealer: Order support - order processed",
+    "dispdealer_ts_repairremake_repair_info": "Dealer: Technical support - repair information",
+    "dispdealer_ts_repairremake_remake_order_info": "Dealer: Technical support - remake order information",
+    "levdispdealer_ordersupport_changed_cancelled": "Levolor dealer: Order support - changed / cancelled",
+    "dispdealer_ts_repairremake_troubleshooting_provided": "Dealer: Technical support - troubleshooting provided",
+    "dispcon_repserv_referred_asc": "Consumer: Repair service - referred to ASC"
+  }
+}

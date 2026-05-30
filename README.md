@@ -9,6 +9,7 @@ Step-by-step pipeline to extract contact-center data from multiple systems, stor
 | **1** | CXone Interaction Analytics | `cxone_transcripts` | Segment `startTime` (client-side) | `run_cxone_extract.py` (daily), `run_cxone_historical_backfill.py` (one-time), `probe_cxone_ia.py` |
 | **2** | Zendesk Support | `zendesk_tickets` | Ticket `created_at` | `run_zendesk_extract.py`, `probe_zendesk.py` |
 | **3** | CXone + Zendesk (linked) | `combined_interactions` | CXone `interaction_start` (optional filter) | `run_build_combined_dataset.py` |
+| **4** | Combined interactions | (report output) | `interaction_start` presets or custom range | `run_interaction_summary.py` |
 
 Both steps use the **same PostgreSQL database** (`DATABASE_URL` in `.env`).
 
@@ -58,8 +59,20 @@ scripts/
   probe_cxone_ia.py
   run_zendesk_extract.py           # Step 2 CLI
   run_build_combined_dataset.py    # Step 3 CLI
+  run_interaction_summary.py       # Step 4 CLI
+  list_call_selection_values.py    # List skills/teams for filter config
   cxone_zendesk_link.json.example  # Step 3 link rules
+  interaction_summary.json.example # Step 4 analysis config
+  disposition_label_map.json.example # Step 4 disposition labels
+  generate_disposition_label_map.py  # Scaffold disposition labels from DB
+  sync_to_railway.py               # Copy tables to Railway Postgres
+  railway_analytics_setup.sql      # Analytics view for chatbot
   probe_zendesk.py
+chatbot/
+  app.py                           # Gradio chatbot (company login)
+  Dockerfile                       # Railway deploy
+docs/
+  CHATBOT_RAILWAY.md               # Railway DB + chatbot setup
 ```
 
 ---
@@ -472,6 +485,108 @@ WHERE link_method = 'call_object_to_parent';
 1. `run_cxone_historical_backfill.py` (once) + `run_cxone_extract.py` (daily)
 2. `run_zendesk_extract.py` (ticket range covering your calls)
 3. `run_build_combined_dataset.py --rebuild` (then incremental by `--interaction-start` / `--interaction-end` after daily extracts)
+4. `run_interaction_summary.py` (top call reasons + recommendations for a time window)
+
+---
+
+## Step 4: Interaction summary (top issues & recommendations)
+
+Step 4 reads `combined_interactions`, ranks **call reasons** by volume and an **importance score** (share of calls, negative CXone sentiment, urgent/high Zendesk priority), and prints actionable recommendations to reduce repeat contacts.
+
+### Configure (optional)
+
+```powershell
+copy config\interaction_summary.json.example config\interaction_summary.json
+copy config\disposition_label_map.json.example config\disposition_label_map.json
+```
+
+Edit `call_reason_fields` to match your Zendesk promoted columns (same fields as `zendesk_field_map.json`). Defaults prefer **reason for contact** fields (not disposition codes used as reasons).
+
+**Disposition labels:** Zendesk disposition values are often internal codes (`dispdealer__ordersupport_product_info`). Map them to readable labels in `config/disposition_label_map.json`. Scaffold from your data:
+
+```powershell
+python scripts/generate_disposition_label_map.py --top 50
+```
+
+Unmapped codes still get a best-effort label when `fallback_humanize` is true.
+
+**Call selection:** Control which rows are analyzed via the `call_selection` block in config (or CLI flags). Discover available values:
+
+```powershell
+python scripts/list_call_selection_values.py --timeframe last-week
+```
+
+Example `call_selection` in `config/interaction_summary.json` (legacy `inbound_only` / `matched_link_methods` still work if omitted):
+
+```json
+"call_selection": {
+  "call_direction": "inbound",
+  "skills": ["LEV Consumer", "HD Warranty Support"],
+  "skills_exclude": [],
+  "teams": [],
+  "media_types": ["PhoneCall"],
+  "link_methods": ["call_object_to_parent"],
+  "include_unmatched": false
+}
+```
+
+| Setting | Purpose |
+|---------|---------|
+| `call_direction` | `all`, `inbound`, or `outbound` |
+| `skills` / `skills_exclude` | Include or exclude by CXone `skill_name` (case-insensitive) |
+| `teams` / `teams_exclude` | Filter by `team_name` |
+| `media_types` / `media_types_exclude` | Filter by `media_type` (e.g. `PhoneCall`) |
+| `link_methods` | Zendesk link methods to include (default: `call_object_to_parent`) |
+| `include_unmatched` | Include segments with no ticket match |
+| `top_n` | Number of reasons and dispositions in the report |
+| `disposition_label_map_path` | JSON map of disposition code → display label |
+| `llm_recommendations` | Optional LLM pass over transcript samples |
+
+### Run Step 4
+
+```powershell
+# Previous calendar week (Mon–Sun UTC) — default
+python scripts/run_interaction_summary.py --timeframe last-week
+
+# Yesterday only
+python scripts/run_interaction_summary.py --timeframe yesterday
+
+# Rolling last 7 days
+python scripts/run_interaction_summary.py --timeframe last-7-days
+
+# All data in combined_interactions
+python scripts/run_interaction_summary.py --timeframe all
+
+# Custom ISO range (overrides preset bounds)
+python scripts/run_interaction_summary.py `
+  --start 2026-05-20T00:00:00Z `
+  --end 2026-05-27T23:59:59Z
+
+# CLI call selection (overrides config for this run)
+python scripts/run_interaction_summary.py --timeframe last-week `
+  --call-direction inbound `
+  --skill "LEV Consumer" `
+  --skill "HD Warranty Support" `
+  --media-type PhoneCall
+
+# Outbound only, exclude a skill
+python scripts/run_interaction_summary.py --timeframe all `
+  --call-direction outbound `
+  --exclude-skill "LEV Consumer"
+
+# Export for dashboards
+python scripts/run_interaction_summary.py --timeframe last-week `
+  --json-output output/interaction_summary.json `
+  --markdown-output output/interaction_summary.md
+
+# LLM recommendations from transcript samples (top 5 reasons by default)
+# Requires OPENAI_API_KEY in .env (OpenAI-compatible chat completions API)
+python scripts/run_interaction_summary.py --timeframe last-week --llm-recommendations
+```
+
+The CLI prints a human-readable report. JSON includes `top_call_reasons` (counts, importance, `recommendation_source`, recommendations), `top_dispositions` (with `disposition` label and `disposition_code`), link-method breakdown, `insights`, and `llm` metadata.
+
+**Recommendations:** By default, **rule-based** suggestions from reason text (`src/orchestration/analysis/recommendations.py`). With `--llm-recommendations` (or `llm_recommendations.enabled` in config), the top N reasons use **transcript excerpts** and CXone summaries via the OpenAI API; rule-based text is used when the LLM is off or fails for a bucket.
 
 ---
 
@@ -524,4 +639,6 @@ WHERE link_method = 'call_object_to_parent';
 - **Step 1** — CXone transcripts → `cxone_transcripts` (done)
 - **Step 2** — Zendesk tickets → `zendesk_tickets` (done)
 - **Step 3** — Combined dataset `combined_interactions` (done)
-- **Step 4** — Summarization / analysis agents on combined data (planned)
+- **Step 4** — Interaction summary on `combined_interactions` (done)
+- **Step 5** — LLM transcript recommendations in Step 4 (done); optional full-transcript deep-dive agent (planned)
+- **Step 6** — Hosted analytics chatbot on Railway with company login ([docs/CHATBOT_RAILWAY.md](docs/CHATBOT_RAILWAY.md))

@@ -59,6 +59,15 @@ class Settings(BaseSettings):
         default="config/cxone_zendesk_link.json",
         alias="CXONE_ZENDESK_LINK_PATH",
     )
+    interaction_summary_config_path: str = Field(
+        default="config/interaction_summary.json",
+        alias="INTERACTION_SUMMARY_CONFIG_PATH",
+    )
+
+    # Step 4 LLM recommendations (optional; uses OpenAI-compatible chat completions API)
+    openai_api_key: str | None = Field(default=None, alias="OPENAI_API_KEY")
+    openai_model: str = Field(default="gpt-4o-mini", alias="OPENAI_MODEL")
+    openai_base_url: str = Field(default="https://api.openai.com/v1", alias="OPENAI_BASE_URL")
 
     # PostgreSQL (local Docker default matches docker-compose.yml)
     database_url: str = Field(

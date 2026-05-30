@@ -1,0 +1,11 @@
+# Chatbot service (Gradio + Text-to-SQL)
+gradio>=4.44.0,<6
+httpx>=0.27.0,<1
+sqlalchemy>=2.0.0,<3
+psycopg[binary]>=3.1.0,<4
+pydantic>=2.0.0,<3
+pydantic-settings>=2.0.0,<3
+python-dotenv>=1.0.0,<2
+
+# Reuse orchestration package from repo
+# (installed via Dockerfile COPY src/)

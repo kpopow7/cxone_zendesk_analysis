@@ -1,0 +1,41 @@
+{
+  "call_reason_fields": [
+    { "column": "cf_reason_for_contact_consumer", "label": "Reason for contact (Consumer)" },
+    { "column": "cf_reason_for_contact_installerdealer", "label": "Reason for contact (Installer/Dealer)" },
+    { "column": "cf_reason_for_contact_customer_levolor", "label": "Reason for contact (Customer Levolor)" },
+    { "column": "cf_disposition", "label": "Disposition" },
+    { "column": "cf_disposition_consumer", "label": "Disposition (Consumer)" },
+    { "column": "cf_disposition_dealer", "label": "Disposition (Dealer)" },
+    { "column": "cf_intent", "label": "Intent" },
+    { "column": "cf_i_need_help_with", "label": "I need help with" }
+  ],
+  "disposition_fields": [
+    "cf_disposition",
+    "cf_disposition_consumer",
+    "cf_disposition_dealer",
+    "cf_disposition_consumer_levolor",
+    "cf_disposition_customer_levolor"
+  ],
+  "disposition_label_map_path": "config/disposition_label_map.json",
+  "disposition_fallback_humanize": true,
+  "call_selection": {
+    "call_direction": "inbound",
+    "skills": [],
+    "skills_exclude": [],
+    "teams": [],
+    "media_types": ["PhoneCall"],
+    "link_methods": ["call_object_to_parent"],
+    "include_unmatched": false
+  },
+  "llm_recommendations": {
+    "enabled": false,
+    "top_reasons": 5,
+    "transcripts_per_reason": 3,
+    "max_transcript_chars": 1200,
+    "max_summary_chars": 400
+  },
+  "fallback_to_ticket_subject": false,
+  "humanize_reason_codes": true,
+  "top_n": 15,
+  "sample_excerpts_per_reason": 2
+}
