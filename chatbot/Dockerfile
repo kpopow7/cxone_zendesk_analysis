@@ -14,7 +14,6 @@ COPY chatbot/ /app/chatbot/
 COPY config/ /app/config/
 
 ENV PYTHONPATH=/app/src
-ENV PORT=7860
 
 EXPOSE 7860
 
