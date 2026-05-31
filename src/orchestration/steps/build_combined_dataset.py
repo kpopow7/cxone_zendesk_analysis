@@ -11,6 +11,7 @@ from orchestration.db.schema import CombinedInteractionRow, CxoneTranscriptRow, 
 from orchestration.db.session import get_engine, get_session_factory
 from orchestration.linking.combined_columns import ensure_combined_interaction_columns
 from orchestration.linking.config import load_link_config, resolve_link_config_path
+from orchestration.linking.field_normalization import load_field_normalization_config
 from orchestration.linking.matcher import TicketLinkIndex
 from orchestration.linking.merge import build_combined_record
 from orchestration.sinks.combined_postgres import PostgresCombinedSink
@@ -40,6 +41,10 @@ def run_build_combined_dataset(
     settings = settings or get_settings()
     config_path = _resolve_link_config_path(settings, link_config_path)
     link_config = load_link_config(config_path)
+    project_root = Path(__file__).resolve().parents[3]
+    normalization_config = load_field_normalization_config(
+        _resolve_field_normalization_config_path(settings, project_root)
+    )
 
     engine = get_engine(settings.database_url)
     ensure_promoted_columns(engine)
@@ -95,6 +100,8 @@ def run_build_combined_dataset(
             detail_ticket=detail_ticket,
             phone_call_ticket=phone_call_ticket,
             resolved=resolved,
+            field_normalization=normalization_config,
+            project_root=project_root,
         )
         records.append(record)
         by_link_method[record.link_method] = by_link_method.get(record.link_method, 0) + 1
@@ -129,3 +136,10 @@ def _resolve_link_config_path(settings: Settings, override: Path | None) -> Path
         return resolve_link_config_path(configured)
     project_root = Path(__file__).resolve().parents[3]
     return resolve_link_config_path(project_root / configured)
+
+
+def _resolve_field_normalization_config_path(settings: Settings, project_root: Path) -> Path:
+    configured = Path(settings.field_normalization_config_path)
+    if configured.is_absolute():
+        return configured
+    return project_root / configured

@@ -135,21 +135,16 @@ def _build_report(
 
     for row in filtered:
         promoted = row.zendesk_promoted_fields if isinstance(row.zendesk_promoted_fields, dict) else {}
-        call_reason, source = extract_call_reason(
-            promoted,
-            reason_fields=config.call_reason_fields,
-            ticket_subject=row.ticket_subject,
-            fallback_to_ticket_subject=config.fallback_to_ticket_subject,
-            humanize_codes=config.humanize_reason_codes,
-        )
+        call_reason, source = _resolve_call_reason(row, promoted, config)
         if source is not None:
             with_reason += 1
 
-        disposition_code, disposition_label = extract_disposition(
+        disposition_code, disposition_label = _resolve_disposition(
+            row,
             promoted,
-            disposition_fields=config.disposition_fields,
-            label_map=disposition_labels,
-            fallback_humanize=disposition_fallback,
+            config,
+            disposition_labels,
+            disposition_fallback,
         )
         if disposition_label:
             disposition_label_counts[disposition_label] += 1
@@ -242,6 +237,40 @@ def _build_report(
         top_call_reasons=top_reasons_payload,
         insights=insights,
         llm=llm_meta,
+    )
+
+
+def _resolve_call_reason(
+    row: CombinedInteractionRow,
+    promoted: dict,
+    config: SummaryAnalysisConfig,
+) -> tuple[str, str | None]:
+    if row.call_reason and str(row.call_reason).strip():
+        return str(row.call_reason).strip(), row.call_reason_source
+    return extract_call_reason(
+        promoted,
+        reason_fields=config.call_reason_fields,
+        ticket_subject=row.ticket_subject,
+        fallback_to_ticket_subject=config.fallback_to_ticket_subject,
+        humanize_codes=config.humanize_reason_codes,
+    )
+
+
+def _resolve_disposition(
+    row: CombinedInteractionRow,
+    promoted: dict,
+    config: SummaryAnalysisConfig,
+    label_map: dict[str, str],
+    fallback_humanize: bool,
+) -> tuple[str | None, str | None]:
+    if row.disposition_label and str(row.disposition_label).strip():
+        code = row.disposition_code.strip() if row.disposition_code else None
+        return code, str(row.disposition_label).strip()
+    return extract_disposition(
+        promoted,
+        disposition_fields=config.disposition_fields,
+        label_map=label_map,
+        fallback_humanize=fallback_humanize,
     )
 
 

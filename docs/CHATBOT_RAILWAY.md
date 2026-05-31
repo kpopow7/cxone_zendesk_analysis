@@ -32,7 +32,7 @@ Complete these on your PC first:
 - [ ] Local pipeline runs and loads data into Docker Postgres (`DATABASE_URL=localhost:5433`)
 - [ ] `TARGET_DATABASE_URL` in `.env` uses the **public** Postgres URL (not `postgres.railway.internal`)
 - [ ] `python scripts/sync_to_railway.py` completes successfully
-- [ ] `scripts/railway_analytics_setup.sql` was run on Railway Postgres (creates `analytics_interactions` view)
+- [ ] `scripts/railway_analytics_setup.sql` was run on Railway Postgres (creates `analytics_interactions` view with normalized `call_reason` / `disposition_label` columns)
 - [ ] This repo is pushed to GitHub (Railway deploys from GitHub)
 
 ---

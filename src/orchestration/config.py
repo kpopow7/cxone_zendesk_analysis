@@ -63,6 +63,10 @@ class Settings(BaseSettings):
         default="config/interaction_summary.json",
         alias="INTERACTION_SUMMARY_CONFIG_PATH",
     )
+    field_normalization_config_path: str = Field(
+        default="config/field_normalization.json",
+        alias="FIELD_NORMALIZATION_CONFIG_PATH",
+    )
 
     # Step 4 LLM recommendations (optional; uses OpenAI-compatible chat completions API)
     openai_api_key: str | None = Field(default=None, alias="OPENAI_API_KEY")
