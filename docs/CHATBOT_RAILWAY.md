@@ -23,9 +23,11 @@ Natural-language Q&A over your `combined_interactions` data, with **company-only
 
 1. Go to [railway.app](https://railway.app) and create a project.
 2. **Add service → Database → PostgreSQL**.
-3. Open the Postgres service → **Connect** → copy `DATABASE_URL` (usually `postgresql://postgres:...@....railway.app:PORT/railway`).
+3. Open the Postgres service → **Connect**. Railway shows two URLs:
+   - **Private** (`postgres.railway.internal`) — use on **Railway services only** (chatbot web service `DATABASE_URL`)
+   - **Public / TCP proxy** (`....proxy.rlwy.net` or `....railway.app`) — use for **sync from your PC** (`TARGET_DATABASE_URL`)
 
-Keep this URL for sync and for the chatbot service.
+Keep the public URL for local sync; use the private URL on the deployed chatbot when both services are in the same Railway project.
 
 ---
 
@@ -35,7 +37,8 @@ Run extracts and combined dataset locally (as today), then sync to Railway:
 
 ```powershell
 # One-time: create tables on Railway + copy data
-$env:TARGET_DATABASE_URL = "postgresql://postgres:PASSWORD@HOST:PORT/railway"
+$env:TARGET_DATABASE_URL = "postgresql://postgres:PASSWORD@PUBLIC_HOST:PORT/railway"
+# PUBLIC_HOST must be the TCP proxy (e.g. monorail.proxy.rlwy.net), NOT postgres.railway.internal
 python scripts/sync_to_railway.py
 
 # Create analytics view for the chatbot
@@ -124,3 +127,4 @@ You can also host the same `chatbot/app.py` on a **private** Hugging Face Space 
 | Empty answers | Run `sync_to_railway.py`; confirm rows in `combined_interactions` |
 | `password authentication failed` | Use Railway `DATABASE_URL` exactly; URL-encode special chars in password |
 | Slow first reply | Normal — two OpenAI calls (SQL + summary) per question |
+| `failed to resolve host 'postgres.railway.internal'` | Local sync needs the **public** Postgres URL in `TARGET_DATABASE_URL`, not the private `*.railway.internal` URL |

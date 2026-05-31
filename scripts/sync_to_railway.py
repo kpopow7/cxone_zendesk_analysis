@@ -16,6 +16,8 @@ SRC = ROOT / "src"
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
+load_dotenv(ROOT / ".env")
+
 from orchestration.db.schema import (  # noqa: E402
     CombinedInteractionRow,
     CxoneTranscriptRow,
@@ -60,7 +62,6 @@ def main(
     init_schema: bool,
 ) -> None:
     """Upsert pipeline tables to Railway for the hosted chatbot."""
-    load_dotenv(ROOT / ".env")
     if not source_url:
         from orchestration.config import get_settings
 
@@ -68,6 +69,15 @@ def main(
 
     source_url = normalize_database_url(source_url)
     target_url = normalize_database_url(target_url)
+
+    if "railway.internal" in target_url:
+        raise click.ClickException(
+            "TARGET_DATABASE_URL uses a Railway private hostname (postgres.railway.internal). "
+            "That URL only works for services running on Railway, not from your PC.\n\n"
+            "Fix: Railway dashboard -> Postgres service -> Connect -> copy the **public** "
+            "URL (host like *.proxy.rlwy.net or *.railway.app, not *.railway.internal).\n"
+            "Keep the private URL for DATABASE_URL on the deployed chatbot service only."
+        )
 
     table_names = [name.strip() for name in tables.split(",") if name.strip()]
     unknown = [name for name in table_names if name not in TABLE_MODELS]
