@@ -9,6 +9,12 @@ _COMBINED_COLUMN_DDL: tuple[tuple[str, str], ...] = (
     ("parent_link_key", "VARCHAR(512)"),
     ("ticket_form_id", "BIGINT"),
     ("zendesk_phone_call_fields", "JSONB DEFAULT '{}'::jsonb NOT NULL"),
+    ("call_reason", "TEXT"),
+    ("call_reason_code", "TEXT"),
+    ("call_reason_source", "VARCHAR(128)"),
+    ("disposition_code", "TEXT"),
+    ("disposition_label", "TEXT"),
+    ("disposition_source", "VARCHAR(128)"),
 )
 
 

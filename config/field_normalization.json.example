@@ -1,0 +1,20 @@
+{
+  "reason_fields": [
+    { "column": "cf_reason_for_contact_consumer", "label": "Reason for contact (Consumer)" },
+    { "column": "cf_reason_for_contact_installerdealer", "label": "Reason for contact (Installer/Dealer)" },
+    { "column": "cf_reason_for_contact_customer_levolor", "label": "Reason for contact (Customer Levolor)" },
+    { "column": "cf_intent", "label": "Intent" },
+    { "column": "cf_i_need_help_with", "label": "I need help with" }
+  ],
+  "disposition_fields": [
+    "cf_disposition",
+    "cf_disposition_consumer",
+    "cf_disposition_dealer",
+    "cf_disposition_consumer_levolor",
+    "cf_disposition_customer_levolor"
+  ],
+  "disposition_label_map_path": "config/disposition_label_map.json",
+  "humanize_reason_codes": true,
+  "disposition_fallback_humanize": true,
+  "fallback_to_ticket_subject": false
+}

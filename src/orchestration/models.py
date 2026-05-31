@@ -100,6 +100,12 @@ class CombinedInteractionRecord:
     ticket_form_id: int | None = None
     zendesk_promoted_fields: dict = field(default_factory=dict)
     zendesk_phone_call_fields: dict = field(default_factory=dict)
+    call_reason: str | None = None
+    call_reason_code: str | None = None
+    call_reason_source: str | None = None
+    disposition_code: str | None = None
+    disposition_label: str | None = None
+    disposition_source: str | None = None
     cxone_extracted_at: datetime | None = None
     zendesk_extracted_at: datetime | None = None
 

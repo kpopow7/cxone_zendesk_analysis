@@ -464,7 +464,10 @@ python scripts/run_build_combined_dataset.py --matched-only --rebuild
 | Call / CXone | `transcript_text`, `segment_summary`, `agent_name`, `call_direction`, `interaction_start` |
 | Ticket / Zendesk (parent) | `ticket_subject`, `ticket_status`, `ticket_description`, `ticket_tags` |
 | Custom fields | `zendesk_promoted_fields` (parent); `zendesk_phone_call_fields` (bridge ticket) |
+| Normalized Zendesk | `call_reason`, `call_reason_code`, `call_reason_source`, `disposition_label`, `disposition_code`, `disposition_source` |
 | Provenance | `built_at`, `cxone_extracted_at`, `zendesk_extracted_at` |
+
+Normalized reason/disposition columns are populated at build time from form-specific Zendesk fields using `config/field_normalization.json` (see `config/field_normalization.json.example`). After upgrading, re-run Step 3 with `--rebuild` and re-sync to Railway.
 
 ### Example queries for analysis
 
@@ -479,11 +482,19 @@ WHERE link_method = 'call_object_parent_not_loaded';
 
 -- Inbound calls with parent-ticket context
 SELECT segment_id, ticket_id, phone_call_ticket_id, ticket_subject, agent_name,
-       zendesk_promoted_fields->>'cf_disposition' AS disposition,
+       call_reason, disposition_label,
        left(transcript_text, 200) AS transcript_preview
 FROM combined_interactions
 WHERE link_method = 'call_object_to_parent'
   AND upper(replace(call_direction, '-', '_')) LIKE '%IN_BOUND%';
+
+-- Top call reasons (uses normalized column)
+SELECT call_reason, COUNT(*) AS n
+FROM combined_interactions
+WHERE call_reason IS NOT NULL
+GROUP BY call_reason
+ORDER BY n DESC
+LIMIT 10;
 
 -- Export-friendly row for LLM summarization (parent ticket fields)
 SELECT segment_id, ticket_id, phone_call_ticket_id, ticket_subject, ticket_description,

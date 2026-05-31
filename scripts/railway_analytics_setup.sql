@@ -23,6 +23,12 @@ SELECT
     ticket_priority,
     ticket_tags,
     zendesk_promoted_fields,
+    call_reason,
+    call_reason_code,
+    call_reason_source,
+    disposition_code,
+    disposition_label,
+    disposition_source,
     built_at
 FROM combined_interactions;
 
