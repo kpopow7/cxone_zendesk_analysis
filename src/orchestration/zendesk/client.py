@@ -58,8 +58,10 @@ class ZendeskClient:
     )
     def get(self, path_or_url: str, *, params: dict | None = None) -> httpx.Response:
         url = path_or_url if path_or_url.startswith("http") else self.api_url(path_or_url)
+        # Avoid duplicating query params when the URL already contains them (pagination links).
+        request_params = None if "?" in url else params
         with httpx.Client(timeout=self._timeout) as client:
-            response = client.get(url, auth=self._auth, params=params or {})
+            response = client.get(url, auth=self._auth, params=request_params or {})
             if response.status_code == 429:
                 response.raise_for_status()
             if not response.is_success:

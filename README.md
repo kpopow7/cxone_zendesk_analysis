@@ -360,13 +360,20 @@ When you’re ready to store ticket conversations, the schema and extractor scaf
 It pulls comments for tickets already loaded into `zendesk_tickets` for the same `created_at` range.
 
 ```powershell
+# Fast bulk mode (default) — Incremental Ticket Event Export
+python scripts/run_zendesk_comments_extract.py `
+  --start 2026-05-20T00:00:00Z `
+  --end 2026-05-20T23:59:59Z
+
+# Slower but simple: /tickets/{id}/comments.json per ticket in DB
 python scripts/run_zendesk_comments_extract.py `
   --start 2026-05-20T00:00:00Z `
   --end 2026-05-20T23:59:59Z `
-  --limit-tickets 50 `
-  --dry-run `
-  --json-output output/zendesk_comments.json
+  --mode per-ticket `
+  --limit-tickets 50
 ```
+
+Incremental mode uses `GET /api/v2/incremental/ticket_events` (no `.json` suffix). Requires **Admin** API access on Zendesk.
 
 ### Date range behavior
 

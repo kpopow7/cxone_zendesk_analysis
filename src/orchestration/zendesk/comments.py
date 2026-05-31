@@ -44,7 +44,8 @@ class ZendeskTicketCommentExtractor:
     ) -> list[TicketCommentRecord]:
         """Bulk extract comment events using Incremental Ticket Event Export.
 
-        Uses `GET /api/v2/incremental/ticket_events.json?start_time=...&include=comment_events`.
+        Uses `GET /api/v2/incremental/ticket_events?start_time=...&include=comment_events`.
+        Note: incremental export paths do not use the `.json` suffix (unlike regular REST resources).
         Filters returned comment events to comment.created_at within [start, end] (UTC).
         """
         start_utc = _ensure_utc(start)
@@ -53,20 +54,23 @@ class ZendeskTicketCommentExtractor:
             raise ValueError("--end must be after --start")
 
         # Zendesk requires start_time to be at least one minute in the past.
-        start_time = int(start_utc.timestamp())
+        now_utc = datetime.now(timezone.utc)
+        latest_allowed = int(now_utc.timestamp()) - 120
+        start_time = min(int(start_utc.timestamp()), latest_allowed)
+
         params: dict[str, Any] = {
             "start_time": start_time,
             "include": "comment_events",
         }
 
         records: list[TicketCommentRecord] = []
-        url: str | None = "/api/v2/incremental/ticket_events.json"
-        max_pages = 100000  # safety; real stop is end_of_stream / end_time
+        url: str | None = "/api/v2/incremental/ticket_events"
+        max_pages = 100000
         pages = 0
 
         while url and pages < max_pages:
             pages += 1
-            payload = self._client.get_json(url, params=params if url.startswith("/") else None)
+            payload = self._client.get_json(url, params=params)
             params = None
 
             ticket_events = payload.get("ticket_events", [])
@@ -83,8 +87,8 @@ class ZendeskTicketCommentExtractor:
                     for child in child_events:
                         if not isinstance(child, dict):
                             continue
-                        # With include=comment_events, comment events appear as objects in child_events.
-                        if (child.get("type") or child.get("event_type")) not in ("Comment", "comment"):
+                        event_type = child.get("type") or child.get("event_type")
+                        if str(event_type).lower() != "comment":
                             continue
                         record = _to_record(int(ticket_id), child)
                         if not record or record.created_at is None:
