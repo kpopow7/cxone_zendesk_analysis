@@ -5,12 +5,43 @@ import re
 from dataclasses import dataclass, field
 
 import httpx
+from tenacity import retry, retry_if_exception, stop_after_attempt, wait_exponential
 
 from orchestration.chatbot.schema_context import build_schema_prompt
 from orchestration.chatbot.settings import ChatbotSettings
 from orchestration.chatbot.sql_executor import QueryResult, execute_readonly_query, format_results_for_llm
 from orchestration.chatbot.sql_guard import validate_sql
 from orchestration.db.session import get_engine
+
+
+def _is_retryable_openai_error(exc: BaseException) -> bool:
+    if isinstance(exc, httpx.HTTPStatusError):
+        return exc.response.status_code in (429, 500, 502, 503, 504)
+    return isinstance(exc, (httpx.TimeoutException, httpx.NetworkError))
+
+
+def _friendly_openai_error(exc: httpx.HTTPStatusError) -> str:
+    code = exc.response.status_code
+    if code == 429:
+        return (
+            "OpenAI rate limit reached (HTTP 429). Each question uses two API calls "
+            "(SQL generation + summary). Wait a minute and try again, or check usage and "
+            "billing limits at https://platform.openai.com/usage"
+        )
+    if code in (401, 403):
+        return (
+            "OpenAI rejected the API key (HTTP "
+            f"{code}). Check OPENAI_API_KEY on the chatbot service."
+        )
+    if code == 404:
+        return (
+            f"OpenAI model not found (HTTP 404). Check OPENAI_MODEL "
+            f"({exc.request.url}); current setting must be available on your account."
+        )
+    body = exc.response.text.strip()
+    if len(body) > 200:
+        body = f"{body[:200]}..."
+    return f"OpenAI API error (HTTP {code}){f': {body}' if body else ''}"
 
 
 @dataclass
@@ -29,7 +60,11 @@ class ChatbotAgent:
 
     def ask(self, question: str, *, history: list[tuple[str, str]] | None = None) -> ChatbotResponse:
         history = history or []
-        sql, sql_error = self._generate_sql(question, history)
+        try:
+            sql, sql_error = self._generate_sql(question, history)
+        except Exception as exc:
+            return ChatbotResponse(answer=_format_agent_error(exc), error=str(exc))
+
         if sql_error and not sql:
             return ChatbotResponse(answer=sql_error, error=sql_error)
 
@@ -81,7 +116,19 @@ class ChatbotAgent:
                     error=str(exc),
                 )
 
-        answer = self._summarize(question, validation.sql, result, history)
+        try:
+            answer = self._summarize(question, validation.sql, result, history)
+        except Exception as exc:
+            return ChatbotResponse(
+                answer=_format_agent_error(exc),
+                sql=validation.sql,
+                row_count=result.row_count,
+                error=str(exc),
+            )
+
+        if not answer or not answer.strip():
+            answer = _format_count_answer(question, result)
+
         if self._settings.chatbot_show_sql:
             answer = f"{answer}\n\n---\n**SQL used:**\n```sql\n{validation.sql}\n```"
 
@@ -169,8 +216,8 @@ class ChatbotAgent:
                 {"role": "user", "content": user},
             ],
         }
-        with httpx.Client(timeout=self._settings.request_timeout_seconds) as client:
-            response = client.post(
+        try:
+            response = self._post_chat_completion(
                 url,
                 headers={
                     "Authorization": f"Bearer {self._settings.openai_api_key}",
@@ -178,9 +225,48 @@ class ChatbotAgent:
                 },
                 json=payload,
             )
-            response.raise_for_status()
-            body = response.json()
+        except httpx.HTTPStatusError as exc:
+            raise RuntimeError(_friendly_openai_error(exc)) from exc
+        body = response.json()
         return str(body["choices"][0]["message"]["content"])
+
+    @retry(
+        retry=retry_if_exception(_is_retryable_openai_error),
+        wait=wait_exponential(multiplier=1, min=2, max=60),
+        stop=stop_after_attempt(5),
+        reraise=True,
+    )
+    def _post_chat_completion(
+        self,
+        url: str,
+        *,
+        headers: dict[str, str],
+        json: dict,
+    ) -> httpx.Response:
+        with httpx.Client(timeout=self._settings.request_timeout_seconds) as client:
+            response = client.post(url, headers=headers, json=json)
+            if response.status_code in (429, 500, 502, 503, 504):
+                response.raise_for_status()
+            response.raise_for_status()
+            return response
+
+
+def _format_agent_error(exc: Exception) -> str:
+    if isinstance(exc, RuntimeError):
+        return str(exc)
+    return f"Something went wrong: {exc}. Check DATABASE_URL and OPENAI_API_KEY."
+
+
+def _format_count_answer(question: str, result: QueryResult) -> str:
+    if result.row_count == 1 and result.rows:
+        row = result.rows[0]
+        if len(row) == 1:
+            value = next(iter(row.values()))
+            return f"The query returned **{value}**."
+    return (
+        f"The query returned {result.row_count} row(s), but summarization produced an empty "
+        "response. Try again or rephrase your question."
+    )
 
 
 def _format_history(history: list[tuple[str, str]]) -> str:

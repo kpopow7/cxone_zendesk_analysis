@@ -255,6 +255,8 @@ For local dev, use the **public** Postgres URL in `DATABASE_URL` (your PC cannot
 | Slow first reply | Normal — two OpenAI calls (SQL + summary) per question |
 | `failed to resolve host 'postgres.railway.internal'` | Local sync needs the **public** Postgres URL in `TARGET_DATABASE_URL`, not `*.railway.internal` |
 | `failed to resolve host 'postgres.railway.internal'` **on Railway** | `DATABASE_URL` reference is wrong or Postgres is in a different project — use Postgres reference in the same project |
+| HTTP **429** / `OpenAI rate limit` | OpenAI RPM/TPM or quota limit — wait 60s, ask one question at a time, check [OpenAI usage](https://platform.openai.com/usage); avoid clicking multiple example questions quickly |
+| Chatbot reply is just **Error** / **ERROR** | Usually an unhandled backend exception — check **chatbot → Deploy Logs** after asking; redeploy latest code; verify `OPENAI_API_KEY`, `DATABASE_URL`, and that `combined_interactions` exists |
 
 ### Where to look in Railway
 

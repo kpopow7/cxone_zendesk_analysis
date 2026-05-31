@@ -3,7 +3,9 @@
 
 from __future__ import annotations
 
+import logging
 import sys
+import traceback
 from pathlib import Path
 
 import gradio as gr
@@ -20,6 +22,9 @@ from orchestration.chatbot.settings import get_chatbot_settings  # noqa: E402
 
 load_dotenv(ROOT / ".env")
 
+logger = logging.getLogger(__name__)
+logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
+
 settings = get_chatbot_settings()
 agent = ChatbotAgent(settings)
 auth_users = load_chatbot_auth_users(settings)
@@ -33,32 +38,64 @@ EXAMPLE_QUESTIONS = [
 ]
 
 
-def respond(message: str, history: list[dict]) -> str:
-    if not message or not message.strip():
-        return "Please enter a question about your call or ticket data."
+def _history_to_legacy(history: list | None) -> list[tuple[str, str]]:
+    """Convert Gradio message history to (user, assistant) pairs."""
+    if not history:
+        return []
 
-    # Gradio 4+ message format: list of {"role", "content"} dicts
     legacy_history: list[tuple[str, str]] = []
-    if history:
+
+    # Gradio 4/5 messages format: [{"role": "...", "content": "..."}]
+    if isinstance(history[0], dict):
         user_buf: str | None = None
         for item in history:
             role = item.get("role")
-            content = str(item.get("content", ""))
+            content = item.get("content", "")
+            if isinstance(content, list):
+                text_parts = [
+                    part.get("text", "")
+                    for part in content
+                    if isinstance(part, dict) and part.get("type") == "text"
+                ]
+                content = " ".join(text_parts).strip()
+            content = str(content).strip()
             if role == "user":
                 user_buf = content
             elif role == "assistant" and user_buf is not None:
                 legacy_history.append((user_buf, content))
                 user_buf = None
+        return legacy_history
+
+    # Legacy tuple/list pairs: [[user, assistant], ...]
+    for item in history:
+        if isinstance(item, (list, tuple)) and len(item) == 2:
+            legacy_history.append((str(item[0]), str(item[1])))
+    return legacy_history
+
+
+def respond(message: str, history: list | None) -> str:
+    if not message or not str(message).strip():
+        return "Please enter a question about your call or ticket data."
 
     try:
-        result = agent.ask(message.strip(), history=legacy_history)
-        return result.answer
+        legacy_history = _history_to_legacy(history)
+        result = agent.ask(str(message).strip(), history=legacy_history)
+        answer = (result.answer or "").strip()
+        if not answer:
+            return (
+                "The chatbot returned an empty response. Check Railway deploy logs and verify "
+                "DATABASE_URL, OPENAI_API_KEY, and that combined_interactions has data."
+            )
+        return answer
     except Exception as exc:
+        logger.error("Chatbot request failed: %s", exc)
+        logger.debug(traceback.format_exc())
         return f"Something went wrong: {exc}. Check DATABASE_URL and OPENAI_API_KEY."
 
 
 demo = gr.ChatInterface(
     fn=respond,
+    type="messages",
     title="Contact Center Analytics Assistant",
     description=(
         "Ask questions about call volume, reasons, dispositions, skills, and trends. "
