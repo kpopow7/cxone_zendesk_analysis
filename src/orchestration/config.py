@@ -63,6 +63,10 @@ class Settings(BaseSettings):
         default="config/interaction_summary.json",
         alias="INTERACTION_SUMMARY_CONFIG_PATH",
     )
+    transcript_summary_config_path: str = Field(
+        default="config/transcript_summary.json",
+        alias="TRANSCRIPT_SUMMARY_CONFIG_PATH",
+    )
     field_normalization_config_path: str = Field(
         default="config/field_normalization.json",
         alias="FIELD_NORMALIZATION_CONFIG_PATH",

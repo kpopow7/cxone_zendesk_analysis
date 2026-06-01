@@ -46,6 +46,32 @@ class CxoneTranscriptRow(Base):
     )
 
 
+class CxoneTranscriptAnalysisRow(Base):
+    """LLM-derived call reason hierarchy from cxone_transcripts (transcript-only analysis)."""
+
+    __tablename__ = "cxone_transcript_analysis"
+
+    segment_id: Mapped[str] = mapped_column(String(255), primary_key=True)
+    transcript_summary: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    primary_reason: Mapped[str] = mapped_column(String(512), nullable=False, default="")
+    secondary_reason: Mapped[str] = mapped_column(String(512), nullable=False, default="")
+    tertiary_reason: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    reduction_hint: Mapped[str | None] = mapped_column(Text, nullable=True)
+    model: Mapped[str] = mapped_column(String(128), nullable=False, default="")
+    analyzed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+        onupdate=func.now(),
+    )
+
+
 class ZendeskTicketRow(Base):
     __tablename__ = "zendesk_tickets"
     # Promoted custom-field columns (cf_*) are attached below from config/zendesk_field_map.json
@@ -192,12 +218,22 @@ from orchestration.zendesk.promoted_columns import (  # noqa: E402
 attach_promoted_columns(ZendeskTicketRow)
 
 
+def ensure_transcript_analysis_table(database_url: str) -> None:
+    """Create cxone_transcript_analysis if missing (safe to call before Step 4b)."""
+    from orchestration.db.session import get_engine
+
+    CxoneTranscriptAnalysisRow.__table__.create(get_engine(database_url), checkfirst=True)
+
+
 def init_database(database_url: str) -> None:
     from orchestration.db.session import get_engine
+    from orchestration.linking.combined_columns import ensure_combined_interaction_columns
 
     engine = get_engine(database_url)
     Base.metadata.create_all(engine)
     ensure_promoted_columns(engine)
+    ensure_combined_interaction_columns(engine)
+    CxoneTranscriptAnalysisRow.__table__.create(engine, checkfirst=True)
 
 
 def utc_now() -> datetime:

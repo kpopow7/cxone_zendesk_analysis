@@ -23,8 +23,8 @@ def main() -> None:
     init_database(settings.database_url)
     print(f"Database ready: {settings.database_url}")
     print(
-        "Tables: cxone_transcripts, zendesk_tickets, zendesk_ticket_comments, "
-        "combined_interactions"
+        "Tables: cxone_transcripts, cxone_transcript_analysis, zendesk_tickets, "
+        "zendesk_ticket_comments, combined_interactions"
     )
 
 
