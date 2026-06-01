@@ -3,7 +3,16 @@ from __future__ import annotations
 from dataclasses import dataclass, replace
 from typing import Any
 
+from typing import Protocol
+
 from orchestration.db.schema import CombinedInteractionRow
+
+
+class SegmentFilterRow(Protocol):
+    call_direction: str | None
+    skill_name: str | None
+    team_name: str | None
+    media_type: str | None
 
 
 def _is_inbound(call_direction: str | None) -> bool:
@@ -122,7 +131,7 @@ def _direction_category(call_direction: str | None) -> str:
     return "other"
 
 
-def _matches_call_direction(row: CombinedInteractionRow, mode: str) -> bool:
+def _matches_call_direction_row(row: SegmentFilterRow, mode: str) -> bool:
     normalized_mode = mode.strip().lower()
     if normalized_mode in ("all", "any", ""):
         return True
@@ -131,6 +140,10 @@ def _matches_call_direction(row: CombinedInteractionRow, mode: str) -> bool:
     if normalized_mode == "outbound":
         return _direction_category(row.call_direction) == "outbound"
     return True
+
+
+def _matches_call_direction(row: CombinedInteractionRow, mode: str) -> bool:
+    return _matches_call_direction_row(row, mode)
 
 
 def _matches_link_method(row: CombinedInteractionRow, filters: CallSelectionFilters) -> bool:
@@ -147,13 +160,12 @@ def _matches_link_method(row: CombinedInteractionRow, filters: CallSelectionFilt
     return False
 
 
-def row_matches_call_selection(
-    row: CombinedInteractionRow,
+def row_matches_segment_filters(
+    row: SegmentFilterRow,
     filters: CallSelectionFilters,
 ) -> bool:
-    if not _matches_call_direction(row, filters.call_direction):
-        return False
-    if not _matches_link_method(row, filters):
+    """Direction, skill, team, and media filters (no Zendesk link_method)."""
+    if not _matches_call_direction_row(row, filters.call_direction):
         return False
     if not _matches_include_exclude(
         row.skill_name,
@@ -172,6 +184,17 @@ def row_matches_call_selection(
         include=filters.media_types_include,
         exclude=filters.media_types_exclude,
     ):
+        return False
+    return True
+
+
+def row_matches_call_selection(
+    row: CombinedInteractionRow,
+    filters: CallSelectionFilters,
+) -> bool:
+    if not row_matches_segment_filters(row, filters):
+        return False
+    if not _matches_link_method(row, filters):
         return False
     return True
 

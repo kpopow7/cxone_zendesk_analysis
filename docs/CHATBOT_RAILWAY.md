@@ -63,15 +63,153 @@ python scripts/sync_to_railway.py
 
 ### Create the analytics view (required for the chatbot)
 
-1. Railway dashboard → **Postgres** service → **Query** tab (or connect with `psql`).
-2. Paste the full contents of `scripts/railway_analytics_setup.sql` and run it.
-3. Confirm the view exists:
+The chatbot queries `analytics_interactions`, a **view** over `combined_interactions`. Sync copies the table data but **does not** create the view — you run `scripts/railway_analytics_setup.sql` once on Railway Postgres (and again after the view definition changes).
+
+See **[Running `railway_analytics_setup.sql` on Railway](#running-railway_analytics_setupsql-on-railway)** below for full steps.
+
+Quick check after setup:
 
 ```sql
 SELECT COUNT(*) FROM analytics_interactions;
 ```
 
 Re-run `sync_to_railway.py` after daily pipeline jobs.
+
+---
+
+## Running `railway_analytics_setup.sql` on Railway
+
+This script creates (or updates) the `analytics_interactions` view. The chatbot and example SQL depend on it.
+
+**Prerequisites**
+
+- Railway Postgres service exists in your project
+- `python scripts/sync_to_railway.py` has completed at least once (`combined_interactions` has rows)
+- If you added normalized columns (`call_reason`, `disposition_label`, etc.), re-run sync **before** updating the view so those columns exist on Railway
+
+**What the script does**
+
+- `CREATE OR REPLACE VIEW analytics_interactions AS SELECT ... FROM combined_interactions`
+- Exposes analytics-friendly columns including `call_reason`, `disposition_label`, and `transcript_preview` (truncated transcript)
+- Does **not** modify or delete table data
+- Safe to re-run anytime the view definition in the repo changes
+
+**What to run**
+
+Only the active SQL block (lines 4–33 in the file). The rest is commented optional setup for a read-only `chatbot_reader` user.
+
+---
+
+### Method A: Railway dashboard (recommended)
+
+1. Open [railway.app](https://railway.app) → your project.
+2. Click the **Postgres** service (database icon — not the chatbot web service).
+3. Open the data/SQL UI. Railway’s label varies by version; look for one of:
+   - **Data** → **Query**
+   - **Database** → **Query**
+   - **Connect** → **Query** tab
+4. On your PC, open `scripts/railway_analytics_setup.sql` in this repo and copy **the entire file** (comments are fine; Postgres ignores `--` lines).
+5. Paste into the Railway query editor.
+6. Click **Run** / **Execute**.
+7. Expect success with no error. `CREATE OR REPLACE VIEW` does not return rows.
+
+**Verify**
+
+Run these in the same query editor:
+
+```sql
+-- View exists and is readable
+SELECT COUNT(*) FROM analytics_interactions;
+
+-- Normalized columns present (after rebuild + sync)
+SELECT call_reason, disposition_label
+FROM analytics_interactions
+WHERE call_reason IS NOT NULL OR disposition_label IS NOT NULL
+LIMIT 5;
+```
+
+If the first query works but the second fails with `column "call_reason" does not exist`, the view is **outdated** — re-run the full setup script after syncing latest `combined_interactions` data.
+
+---
+
+### Method B: `psql` from your PC (Windows)
+
+Use the **public TCP proxy** URL from Postgres → **Connect** (same URL as `TARGET_DATABASE_URL`, not `postgres.railway.internal`).
+
+**Install `psql`** if needed:
+
+- [PostgreSQL Windows installer](https://www.postgresql.org/download/windows/) (client tools only), or
+- `winget install PostgreSQL.PostgreSQL` and use `psql` from the install `bin` folder
+
+**Run the script**
+
+```powershell
+cd C:\Users\kpopo\OneDrive\Documents\cxone_zendesk_analysis
+
+# Public URL from Railway Postgres -> Connect
+$env:DATABASE_URL = "postgresql://postgres:PASSWORD@PUBLIC_HOST:PORT/railway"
+
+psql $env:DATABASE_URL -f scripts/railway_analytics_setup.sql
+```
+
+You should see:
+
+```text
+CREATE VIEW
+```
+
+**Verify**
+
+```powershell
+psql $env:DATABASE_URL -c "SELECT COUNT(*) FROM analytics_interactions;"
+```
+
+**Common `psql` errors**
+
+| Error | Fix |
+|-------|-----|
+| `could not translate host name` | Use the **public** proxy host, not `postgres.railway.internal` |
+| `password authentication failed` | Copy the URL exactly from Railway Connect; URL-encode special characters in the password |
+| `relation "combined_interactions" does not exist` | Run `python scripts/sync_to_railway.py` first |
+| `column "call_reason" does not exist` | Re-run sync after local rebuild, then re-run this setup script |
+
+---
+
+### Method C: Railway CLI (optional)
+
+If you use the [Railway CLI](https://docs.railway.app/guides/cli):
+
+```powershell
+cd C:\Users\kpopo\OneDrive\Documents\cxone_zendesk_analysis
+railway link
+railway run psql $DATABASE_URL -f scripts/railway_analytics_setup.sql
+```
+
+`railway run` injects the linked service’s `DATABASE_URL` (usually the private URL, which works from Railway’s environment). For local `psql`, prefer Method B with the public URL.
+
+---
+
+### When to re-run the setup script
+
+| Situation | Action |
+|-----------|--------|
+| First-time chatbot setup | Run once after first successful sync |
+| View definition changed in repo (new columns) | Re-run after sync |
+| Error: `relation "analytics_interactions" does not exist` | Run the script |
+| View exists but missing `call_reason` / `disposition_label` | Re-run sync, then re-run script |
+| Daily pipeline / sync only | **Do not** re-run unless the SQL file changed |
+
+---
+
+### Optional: read-only `chatbot_reader` user
+
+The bottom of `railway_analytics_setup.sql` has commented `CREATE USER` / `GRANT` statements. Only use if you want the chatbot service to use a non-`postgres` login:
+
+1. Uncomment those lines in a **copy** (not committed) with a strong password.
+2. Run in Railway Query or `psql`.
+3. Set chatbot service `DATABASE_URL` to the `chatbot_reader` connection string.
+
+Most setups can keep the Postgres reference variable on the chatbot service.
 
 ---
 
@@ -254,6 +392,7 @@ For local dev, use the **public** Postgres URL in `DATABASE_URL` (your PC cannot
 | `password authentication failed` | Use Railway `DATABASE_URL` exactly; URL-encode special chars in password |
 | Slow first reply | Normal — two OpenAI calls (SQL + summary) per question |
 | `failed to resolve host 'postgres.railway.internal'` | Local sync needs the **public** Postgres URL in `TARGET_DATABASE_URL`, not `*.railway.internal` |
+| `column "call_reason" does not exist` during sync | Re-run `python scripts/sync_to_railway.py` (latest code migrates missing columns on Railway automatically) |
 | `failed to resolve host 'postgres.railway.internal'` **on Railway** | `DATABASE_URL` reference is wrong or Postgres is in a different project — use Postgres reference in the same project |
 | HTTP **429** / `OpenAI rate limit` | OpenAI RPM/TPM or quota limit — wait 60s, ask one question at a time, check [OpenAI usage](https://platform.openai.com/usage); avoid clicking multiple example questions quickly |
 | Chatbot reply is just **Error** / **ERROR** | Usually an unhandled backend exception — check **chatbot → Deploy Logs** after asking; redeploy latest code; verify `OPENAI_API_KEY`, `DATABASE_URL`, and that `combined_interactions` exists |

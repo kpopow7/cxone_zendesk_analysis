@@ -10,6 +10,7 @@ Step-by-step pipeline to extract contact-center data from multiple systems, stor
 | **2** | Zendesk Support | `zendesk_tickets` | Ticket `created_at` | `run_zendesk_extract.py`, `probe_zendesk.py` |
 | **3** | CXone + Zendesk (linked) | `combined_interactions` | CXone `interaction_start` (optional filter) | `run_build_combined_dataset.py` |
 | **4** | Combined interactions | (report output) | `interaction_start` presets or custom range | `run_interaction_summary.py` |
+| **4b** | CXone transcripts only | `cxone_transcript_analysis` + report | `interaction_start` presets or custom range | `run_transcript_summary.py` |
 | **Daily** | All three load steps | Yesterday (configurable TZ) | `run_daily_pipeline.py` ([schedule guide](docs/DAILY_SCHEDULE.md)) |
 
 Both steps use the **same PostgreSQL database** (`DATABASE_URL` in `.env`).
@@ -61,12 +62,14 @@ scripts/
   run_zendesk_extract.py           # Step 2 CLI
   run_build_combined_dataset.py    # Step 3 CLI
   run_interaction_summary.py       # Step 4 CLI
+  run_transcript_summary.py        # Step 4b transcript-only LLM reasons
   run_daily_pipeline.py            # Daily CXone + Zendesk + combined (all-in-one)
   run_daily_pipeline.ps1           # Windows runner with logging
   register_daily_task.ps1          # Register Windows Task Scheduler job
   list_call_selection_values.py    # List skills/teams for filter config
   cxone_zendesk_link.json.example  # Step 3 link rules
   interaction_summary.json.example # Step 4 analysis config
+  transcript_summary.json.example  # Step 4b transcript LLM analysis
   disposition_label_map.json.example # Step 4 disposition labels
   generate_disposition_label_map.py  # Scaffold disposition labels from DB
   sync_to_railway.py               # Copy tables to Railway Postgres
@@ -612,6 +615,57 @@ The CLI prints a human-readable report. JSON includes `top_call_reasons` (counts
 
 ---
 
+## Step 4b: Transcript-only summary (LLM call reasons)
+
+Step 4b analyzes **`cxone_transcripts` only** (no Zendesk ticket fields). Each call transcript is classified by an LLM into:
+
+| Level | Example (remake) |
+|-------|------------------|
+| **Primary** | Remake order |
+| **Secondary** | Place new remake order / Ask remake policy / Check remake status |
+| **Tertiary** | Agent-assisted order entry (optional finer slice) |
+
+Results are cached in **`cxone_transcript_analysis`** so re-runs skip already-classified segments. The report ranks primary reasons, shows secondary and tertiary breakdowns, and suggests actions to **reduce call volume** (LLM or rule-based).
+
+### Configure
+
+```powershell
+copy config\transcript_summary.json.example config\transcript_summary.json
+```
+
+Set `OPENAI_API_KEY` in `.env`. Tune `call_selection` (direction, skills, `PhoneCall` media type) like Step 4 — link-method filters do not apply here.
+
+If you upgraded from an older version, create the cache table once:
+
+```powershell
+python scripts/init_db.py
+```
+
+### Run Step 4b
+
+```powershell
+# Classify last week's inbound phone transcripts and print report
+python scripts/run_transcript_summary.py --timeframe last-week
+
+# Test on 10 calls first (still uses cache for those segment_ids)
+python scripts/run_transcript_summary.py --timeframe yesterday --limit 10
+
+# Force re-classification
+python scripts/run_transcript_summary.py --timeframe last-week --reanalyze
+
+# Export
+python scripts/run_transcript_summary.py --timeframe last-week `
+  --json-output output/transcript_summary.json `
+  --markdown-output output/transcript_summary.md
+
+# Rule-based reduction tips only (no second LLM pass)
+python scripts/run_transcript_summary.py --timeframe last-week --no-reduction-llm
+```
+
+**Cost note:** Step 4b runs one LLM call per transcript (plus optional reduction calls for top primary reasons). Use `--limit` while tuning prompts, then run the full window.
+
+---
+
 ## Troubleshooting PostgreSQL connections
 
 **Symptom:** `password authentication failed for user "orchestration"`
@@ -662,5 +716,6 @@ The CLI prints a human-readable report. JSON includes `top_call_reasons` (counts
 - **Step 2** — Zendesk tickets → `zendesk_tickets` (done)
 - **Step 3** — Combined dataset `combined_interactions` (done)
 - **Step 4** — Interaction summary on `combined_interactions` (done)
+- **Step 4b** — Transcript-only LLM primary/secondary/tertiary reasons on `cxone_transcripts` (done)
 - **Step 5** — LLM transcript recommendations in Step 4 (done); optional full-transcript deep-dive agent (planned)
 - **Step 6** — Hosted analytics chatbot on Railway with company login ([docs/CHATBOT_RAILWAY.md](docs/CHATBOT_RAILWAY.md))

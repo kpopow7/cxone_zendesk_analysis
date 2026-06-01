@@ -85,6 +85,7 @@ def main(
         raise click.ClickException(f"Unknown tables: {unknown}. Choose from {list(TABLE_MODELS)}")
 
     if init_schema:
+        click.echo("Ensuring target schema (tables + column migrations)...")
         init_database(target_url)
 
     source_factory = get_session_factory(source_url)
@@ -95,16 +96,19 @@ def main(
         model = TABLE_MODELS[table_name]
         click.echo(f"Syncing {table_name}...")
         copied = 0
-        with source_factory() as src_session, target_factory() as tgt_session:
-            stream = src_session.scalars(select(model)).yield_per(batch_size)
-            batch: list = []
-            for row in stream:
-                batch.append(row)
-                if len(batch) >= batch_size:
+        try:
+            with source_factory() as src_session, target_factory() as tgt_session:
+                stream = src_session.scalars(select(model)).yield_per(batch_size)
+                batch: list = []
+                for row in stream:
+                    batch.append(row)
+                    if len(batch) >= batch_size:
+                        copied += _upsert_batch(tgt_session, model, batch, target_engine)
+                        batch.clear()
+                if batch:
                     copied += _upsert_batch(tgt_session, model, batch, target_engine)
-                    batch.clear()
-            if batch:
-                copied += _upsert_batch(tgt_session, model, batch, target_engine)
+        except Exception as exc:
+            raise click.ClickException(_format_sync_error(table_name, exc)) from exc
         click.echo(f"  {table_name}: {copied} rows upserted")
 
     click.echo("Done. Run scripts/railway_analytics_setup.sql on the target DB next.")
@@ -131,6 +135,33 @@ def _upsert_batch(session: Session, model, rows: list, engine) -> int:
     session.execute(stmt)
     session.commit()
     return len(values)
+
+
+def _format_sync_error(table_name: str, exc: Exception) -> str:
+    root = exc
+    while root.__cause__ is not None:
+        root = root.__cause__
+    message = str(root) if root is not exc else str(exc)
+    type_name = type(root).__name__
+    if "UndefinedColumn" in type_name or "does not exist" in message:
+        if "call_reason" in message or "disposition_label" in message:
+            return (
+                f"Sync failed on {table_name}: Railway Postgres is missing new normalized columns "
+                f"(call_reason, disposition_label, etc.).\n\n"
+                f"Re-run with schema init enabled (default):\n"
+                f"  python scripts/sync_to_railway.py\n\n"
+                f"If it still fails, run init manually then sync again:\n"
+                f"  python -c \"from orchestration.db.schema import init_database; "
+                f"init_database('YOUR_TARGET_URL')\""
+            )
+        return (
+            f"Sync failed on {table_name}: target table schema is out of date.\n"
+            f"Run: python scripts/sync_to_railway.py  (uses --init-schema by default)\n\n"
+            f"Detail: {message[:500]}"
+        )
+    if len(message) > 800:
+        message = message[:800] + "..."
+    return f"Sync failed on {table_name}: {message}"
 
 
 if __name__ == "__main__":
