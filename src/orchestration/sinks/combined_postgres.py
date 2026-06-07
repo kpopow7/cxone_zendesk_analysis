@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from sqlalchemy import inspect
 from sqlalchemy.dialects.postgresql import insert
 
 from orchestration.config import Settings
@@ -7,6 +8,8 @@ from orchestration.db.schema import CombinedInteractionRow, init_database, utc_n
 from orchestration.db.session import get_engine, get_session_factory
 from orchestration.linking.combined_columns import ensure_combined_interaction_columns
 from orchestration.models import CombinedInteractionRecord
+
+UPSERT_BATCH_SIZE = 50
 
 
 class PostgresCombinedSink:
@@ -24,26 +27,36 @@ class PostgresCombinedSink:
             return {"upserted": 0}
 
         built_at = utc_now()
-        rows = [_record_to_row(record, built_at) for record in records]
+        upserted = 0
 
         with self._session_factory() as session:
-            for row in rows:
-                stmt = insert(CombinedInteractionRow).values(**row)
-                excluded = stmt.excluded
-                update_columns = {
-                    column.name: getattr(excluded, column.name)
-                    for column in CombinedInteractionRow.__table__.columns
-                    if column.name not in ("segment_id", "created_at")
-                }
-                update_columns["updated_at"] = utc_now()
-                stmt = stmt.on_conflict_do_update(
-                    index_elements=[CombinedInteractionRow.segment_id],
-                    set_=update_columns,
-                )
-                session.execute(stmt)
-            session.commit()
+            for offset in range(0, len(records), UPSERT_BATCH_SIZE):
+                batch = records[offset : offset + UPSERT_BATCH_SIZE]
+                rows = [_record_to_row(record, built_at) for record in batch]
+                upserted += _upsert_batch(session, rows)
 
-        return {"upserted": len(records)}
+        return {"upserted": upserted}
+
+
+def _upsert_batch(session, rows: list[dict]) -> int:
+    if not rows:
+        return 0
+
+    pk_names = [key.name for key in inspect(CombinedInteractionRow).primary_key]
+    stmt = insert(CombinedInteractionRow).values(rows)
+    update_columns = {
+        col.name: stmt.excluded[col.name]
+        for col in CombinedInteractionRow.__table__.columns
+        if col.name not in pk_names and col.name != "created_at"
+    }
+    update_columns["updated_at"] = utc_now()
+    stmt = stmt.on_conflict_do_update(
+        index_elements=pk_names,
+        set_=update_columns,
+    )
+    session.execute(stmt)
+    session.commit()
+    return len(rows)
 
 
 def _record_to_row(record: CombinedInteractionRecord, built_at) -> dict:

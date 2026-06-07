@@ -37,3 +37,15 @@ def test_blocks_disallowed_table() -> None:
     result = validate_sql(sql)
     assert not result.ok
     assert "not allowed" in (result.error or "").lower()
+
+
+def test_allows_analytics_transcript_summaries() -> None:
+    sql = """
+    SELECT primary_reason, secondary_reason, transcript_summary
+    FROM analytics_transcript_summaries
+    WHERE interaction_start >= NOW() - INTERVAL '7 days'
+    ORDER BY interaction_start DESC
+    LIMIT 10
+    """
+    result = validate_sql(sql)
+    assert result.ok, result.error

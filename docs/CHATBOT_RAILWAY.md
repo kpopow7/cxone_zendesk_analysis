@@ -32,7 +32,8 @@ Complete these on your PC first:
 - [ ] Local pipeline runs and loads data into Docker Postgres (`DATABASE_URL=localhost:5433`)
 - [ ] `TARGET_DATABASE_URL` in `.env` uses the **public** Postgres URL (not `postgres.railway.internal`)
 - [ ] `python scripts/sync_to_railway.py` completes successfully
-- [ ] `scripts/railway_analytics_setup.sql` was run on Railway Postgres (creates `analytics_interactions` view with normalized `call_reason` / `disposition_label` columns)
+- [ ] Analytics views exist on Railway (`analytics_interactions`, `analytics_transcript_summaries` if using Step 4b)
+- [ ] Knowledge index built for RAG (`python scripts/build_knowledge_index.py` — see [docs/RAG.md](../docs/RAG.md))
 - [ ] This repo is pushed to GitHub (Railway deploys from GitHub)
 
 ---
@@ -63,7 +64,7 @@ python scripts/sync_to_railway.py
 
 ### Create the analytics view (required for the chatbot)
 
-The chatbot queries `analytics_interactions`, a **view** over `combined_interactions`. Sync copies the table data but **does not** create the view — you run `scripts/railway_analytics_setup.sql` once on Railway Postgres (and again after the view definition changes).
+The chatbot queries **`analytics_interactions`** (Zendesk-linked calls) and optionally **`analytics_transcript_summaries`** (per-call LLM transcript reasons from Step 4b). `sync_to_railway.py` creates/refreshes these views on the target DB; you can also run `scripts/railway_analytics_setup.sql` manually.
 
 See **[Running `railway_analytics_setup.sql` on Railway](#running-railway_analytics_setupsql-on-railway)** below for full steps.
 
@@ -79,7 +80,7 @@ Re-run `sync_to_railway.py` after daily pipeline jobs.
 
 ## Running `railway_analytics_setup.sql` on Railway
 
-This script creates (or updates) the `analytics_interactions` view. The chatbot and example SQL depend on it.
+This script creates (or updates) `analytics_interactions` and `analytics_transcript_summaries`. The chatbot and example SQL depend on them.
 
 **Prerequisites**
 
@@ -393,6 +394,9 @@ For local dev, use the **public** Postgres URL in `DATABASE_URL` (your PC cannot
 | Slow first reply | Normal — two OpenAI calls (SQL + summary) per question |
 | `failed to resolve host 'postgres.railway.internal'` | Local sync needs the **public** Postgres URL in `TARGET_DATABASE_URL`, not `*.railway.internal` |
 | `column "call_reason" does not exist` during sync | Re-run `python scripts/sync_to_railway.py` (latest code migrates missing columns on Railway automatically) |
+| `out of memory for query result` on `cxone_transcripts` | Transcript rows are large. Use `--batch-size 10`. `raw_metadata` is omitted by default. |
+| `out of memory for query result` on `combined_interactions` | Sync truncates `transcript_text` to 2000 chars at source (full text stays in `cxone_transcripts`). Default batch is 10; retry with `--batch-size 5` if needed. |
+| `extension "vector" is not available` during **sync** | Fixed: sync no longer requires pgvector. If you see this on `build_knowledge_index.py`, enable pgvector on that database (Railway Query: `CREATE EXTENSION vector;`) or use the pgvector Docker image locally. |
 | `failed to resolve host 'postgres.railway.internal'` **on Railway** | `DATABASE_URL` reference is wrong or Postgres is in a different project — use Postgres reference in the same project |
 | HTTP **429** / `OpenAI rate limit` | OpenAI RPM/TPM or quota limit — wait 60s, ask one question at a time, check [OpenAI usage](https://platform.openai.com/usage); avoid clicking multiple example questions quickly |
 | Chatbot reply is just **Error** / **ERROR** | Usually an unhandled backend exception — check **chatbot → Deploy Logs** after asking; redeploy latest code; verify `OPENAI_API_KEY`, `DATABASE_URL`, and that `combined_interactions` exists |

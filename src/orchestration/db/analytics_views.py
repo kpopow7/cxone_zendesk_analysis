@@ -1,7 +1,9 @@
--- Run on Railway Postgres (or local Docker) after pipeline tables are populated.
--- Railway dashboard -> Postgres -> Query, or: psql "$DATABASE_URL" -f scripts/railway_analytics_setup.sql
--- Also applied automatically by init_db.py and sync_to_railway.py.
+from __future__ import annotations
 
+from sqlalchemy.engine import Engine
+from sqlalchemy.sql import text
+
+ANALYTICS_INTERACTIONS_VIEW = """
 CREATE OR REPLACE VIEW analytics_interactions AS
 SELECT
     segment_id,
@@ -31,8 +33,10 @@ SELECT
     disposition_label,
     disposition_source,
     built_at
-FROM combined_interactions;
+FROM combined_interactions
+"""
 
+ANALYTICS_TRANSCRIPT_SUMMARIES_VIEW = """
 CREATE OR REPLACE VIEW analytics_transcript_summaries AS
 SELECT
     a.segment_id,
@@ -54,17 +58,12 @@ SELECT
     a.analyzed_at,
     left(t.transcript_text, 2000) AS transcript_preview
 FROM cxone_transcript_analysis AS a
-JOIN cxone_transcripts AS t ON t.segment_id = a.segment_id;
+JOIN cxone_transcripts AS t ON t.segment_id = a.segment_id
+"""
 
--- Optional: dedicated read-only DB user for the chatbot web service.
--- Replace the password before running.
---
--- CREATE USER chatbot_reader WITH PASSWORD 'your-strong-password';
--- GRANT CONNECT ON DATABASE railway TO chatbot_reader;
--- GRANT USAGE ON SCHEMA public TO chatbot_reader;
--- GRANT SELECT ON analytics_interactions, analytics_transcript_summaries,
---   combined_interactions, cxone_transcript_analysis, cxone_transcripts, zendesk_tickets
---   TO chatbot_reader;
---
--- Chatbot service DATABASE_URL:
--- postgresql+psycopg://chatbot_reader:your-strong-password@HOST:PORT/railway
+
+def ensure_analytics_views(engine: Engine) -> None:
+    """Create or refresh analytics views used by the chatbot and reporting."""
+    with engine.begin() as connection:
+        connection.execute(text(ANALYTICS_INTERACTIONS_VIEW))
+        connection.execute(text(ANALYTICS_TRANSCRIPT_SUMMARIES_VIEW))

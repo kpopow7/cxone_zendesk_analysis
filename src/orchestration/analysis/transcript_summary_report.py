@@ -37,12 +37,13 @@ from orchestration.analysis.transcript_summary_config import (
     load_transcript_summary_config,
 )
 from orchestration.config import Settings
+from orchestration.db.analytics_views import ensure_analytics_views
 from orchestration.db.schema import (
     CxoneTranscriptAnalysisRow,
     CxoneTranscriptRow,
     ensure_transcript_analysis_table,
 )
-from orchestration.db.session import get_session_factory
+from orchestration.db.session import get_engine, get_session_factory
 
 logger = logging.getLogger(__name__)
 
@@ -204,13 +205,15 @@ def _build_report(
         config=config,
     )
 
+    persisted_count = 0
     if config.classification.store_results and classified_new:
-        _persist_analyses(
+        persisted_count = _persist_analyses(
             session,
             classified_new,
             model=settings.openai_model,
         )
         session.commit()
+        ensure_analytics_views(get_engine(settings.database_url))
 
     analyses: dict[str, TranscriptReasonAnalysis] = {}
     for segment_id, row in existing.items():
@@ -272,8 +275,10 @@ def _build_report(
         "transcripts_with_text": sum(1 for r in rows if (r.transcript_text or "").strip()),
         "transcripts_analyzed": total,
         "transcripts_classified_this_run": len(classified_new),
+        "transcripts_persisted_this_run": persisted_count,
         "transcripts_reused_from_cache": total - len(classified_new),
         "classification_error_count": classify_errors,
+        "summaries_in_database": total if config.classification.store_results else 0,
     }
 
     insights = _build_insights(
@@ -387,7 +392,7 @@ def _persist_analyses(
     analyses: dict[str, TranscriptReasonAnalysis],
     *,
     model: str,
-) -> None:
+) -> int:
     now = datetime.now(timezone.utc)
     for segment_id, analysis in analyses.items():
         row = session.get(CxoneTranscriptAnalysisRow, segment_id)
@@ -405,6 +410,7 @@ def _persist_analyses(
         row.reduction_hint = analysis.reduction_hint
         row.model = model
         row.analyzed_at = now
+    return len(analyses)
 
 
 def _aggregate_primary_buckets(

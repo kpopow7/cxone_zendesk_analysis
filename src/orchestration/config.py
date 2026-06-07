@@ -75,6 +75,10 @@ class Settings(BaseSettings):
     # Step 4 LLM recommendations (optional; uses OpenAI-compatible chat completions API)
     openai_api_key: str | None = Field(default=None, alias="OPENAI_API_KEY")
     openai_model: str = Field(default="gpt-4o-mini", alias="OPENAI_MODEL")
+    openai_embedding_model: str = Field(
+        default="text-embedding-3-small",
+        alias="OPENAI_EMBEDDING_MODEL",
+    )
     openai_base_url: str = Field(default="https://api.openai.com/v1", alias="OPENAI_BASE_URL")
 
     # PostgreSQL (local Docker default matches docker-compose.yml)

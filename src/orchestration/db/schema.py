@@ -226,6 +226,8 @@ def ensure_transcript_analysis_table(database_url: str) -> None:
 
 
 def init_database(database_url: str) -> None:
+    from orchestration.db.analytics_views import ensure_analytics_views
+    from orchestration.db.knowledge_schema import ensure_knowledge_schema
     from orchestration.db.session import get_engine
     from orchestration.linking.combined_columns import ensure_combined_interaction_columns
 
@@ -234,6 +236,8 @@ def init_database(database_url: str) -> None:
     ensure_promoted_columns(engine)
     ensure_combined_interaction_columns(engine)
     CxoneTranscriptAnalysisRow.__table__.create(engine, checkfirst=True)
+    ensure_analytics_views(engine)
+    ensure_knowledge_schema(engine, required=False)
 
 
 def utc_now() -> datetime:
