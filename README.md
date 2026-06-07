@@ -625,7 +625,15 @@ Step 4b analyzes **`cxone_transcripts` only** (no Zendesk ticket fields). Each c
 | **Secondary** | Place new remake order / Ask remake policy / Check remake status |
 | **Tertiary** | Agent-assisted order entry (optional finer slice) |
 
-Results are cached in **`cxone_transcript_analysis`** so re-runs skip already-classified segments. The report ranks primary reasons, shows secondary and tertiary breakdowns, and suggests actions to **reduce call volume** (LLM or rule-based).
+Each classified call is stored in **`cxone_transcript_analysis`** (one row per `segment_id`: summary, primary/secondary/tertiary reasons, reduction hint). Re-runs skip already-classified segments when `skip_existing` is true. The report ranks primary reasons, shows secondary and tertiary breakdowns, and suggests actions to **reduce call volume** (LLM or rule-based).
+
+**Chatbot / agent queries:** Per-call rows are exposed as the **`analytics_transcript_summaries`** view (joins analysis + `cxone_transcripts` metadata). The hosted chatbot can query primary reasons, sub-reasons, and `transcript_summary` per call. After classifying locally, sync to Railway:
+
+```powershell
+python scripts/sync_to_railway.py --tables cxone_transcripts,cxone_transcript_analysis
+```
+
+(`sync_to_railway.py` also refreshes analytics views on the target DB.)
 
 ### Configure
 
@@ -663,6 +671,16 @@ python scripts/run_transcript_summary.py --timeframe last-week --no-reduction-ll
 ```
 
 **Cost note:** Step 4b runs one LLM call per transcript (plus optional reduction calls for top primary reasons). Use `--limit` while tuning prompts, then run the full window.
+
+### RAG index for the chatbot
+
+After transcript summarization, build the semantic search index so the chatbot can answer contextual questions (not just SQL aggregates). See **[docs/RAG.md](docs/RAG.md)**.
+
+```powershell
+python scripts/build_knowledge_index.py --timeframe last-week
+```
+
+On Railway, point `DATABASE_URL` at `TARGET_DATABASE_URL` and run the same command after syncing tables.
 
 ---
 

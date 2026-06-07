@@ -31,10 +31,10 @@ auth_users = load_chatbot_auth_users(settings)
 
 EXAMPLE_QUESTIONS = [
     "What were the top 10 call reasons for inbound calls in the last 7 days?",
-    "How many calls per skill last week for LEV Consumer?",
-    "What are the top dispositions this month?",
-    "Show call volume by day for the last 14 days (inbound only).",
-    "Which skills have the highest negative client sentiment rate last week?",
+    "Why are customers calling about remakes on HD Brite? Give examples.",
+    "What are customers usually trying to accomplish on remake calls?",
+    "How many inbound calls per skill last week?",
+    "What patterns do you see in warranty calls and how could we reduce them?",
 ]
 
 
@@ -98,7 +98,8 @@ demo = gr.ChatInterface(
     type="messages",
     title="Contact Center Analytics Assistant",
     description=(
-        "Ask questions about call volume, reasons, dispositions, skills, and trends. "
+        "Ask about call volume, reasons, dispositions, skills, trends, and contextual "
+        "questions about what customers are calling about (semantic search over call summaries). "
         "Data is queried live from PostgreSQL (Railway). **Company login required.**"
     ),
     examples=EXAMPLE_QUESTIONS,

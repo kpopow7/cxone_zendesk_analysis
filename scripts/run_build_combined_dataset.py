@@ -39,6 +39,14 @@ from orchestration.steps.build_combined_dataset import run_build_combined_datase
     is_flag=True,
     help="Delete all combined_interactions rows before rebuilding.",
 )
+@click.option(
+    "--batch-size",
+    "cxone_batch_size",
+    type=int,
+    default=50,
+    show_default=True,
+    help="CXone segments per read batch (lower if Postgres runs out of memory).",
+)
 @click.option("--dry-run", is_flag=True, help="Compute link stats only; do not write to PostgreSQL.")
 @click.option(
     "--link-config",
@@ -51,6 +59,7 @@ def main(
     interaction_end: str | None,
     matched_only: bool,
     rebuild: bool,
+    cxone_batch_size: int,
     dry_run: bool,
     link_config: Path | None,
 ) -> None:
@@ -71,6 +80,7 @@ def main(
         rebuild=rebuild,
         dry_run=dry_run,
         link_config_path=link_config,
+        cxone_batch_size=cxone_batch_size,
     )
 
     click.echo(f"CXone segments considered: {result.cxone_segments_considered}")

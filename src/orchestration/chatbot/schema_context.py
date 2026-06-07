@@ -27,6 +27,21 @@ Columns:
 - disposition_source (text) — source field, e.g. cf_disposition_dealer
 - zendesk_promoted_fields (jsonb) — raw Zendesk custom fields (use only for drill-down)
 
+## Transcript-only LLM summaries: analytics_transcript_summaries (preferred for transcript-derived reasons)
+One row per classified call segment from run_transcript_summary.py (cxone_transcript_analysis joined to cxone_transcripts).
+Use when the user asks about transcript-based reasons, sub-reasons, or per-call LLM summaries — not Zendesk ticket fields.
+
+Columns:
+- segment_id (text, PK)
+- interaction_start, interaction_end (timestamptz)
+- call_direction, media_type, skill_name, team_name, agent_name (text)
+- client_sentiment, agent_sentiment (text)
+- transcript_summary (text) — LLM summary of the call
+- primary_reason, secondary_reason, tertiary_reason (text) — hierarchical call reasons from transcript
+- reduction_hint (text) — one-line suggestion to reduce similar contacts
+- analysis_model (text), analyzed_at (timestamptz)
+- transcript_preview (text) — first ~2000 chars of transcript
+
 ## Fallback: combined_interactions
 Same as analytics_interactions but includes full transcript_text (large). Prefer analytics_interactions.
 
@@ -36,6 +51,7 @@ Same as analytics_interactions but includes full transcript_text (large). Prefer
 - Inbound calls: upper(replace(call_direction, '-', '_')) LIKE '%IN_BOUND%'
 - Default to inbound PhoneCall when user asks about "calls" without specifying direction
 - Prefer link_method = 'call_object_to_parent' for ticket-enriched analysis unless user wants all segments
+- For transcript-only LLM reasons (primary/secondary/tertiary), use analytics_transcript_summaries — not call_reason from Zendesk
 - Use date ranges on interaction_start (timestamptz). "Last week" = previous Mon-Sun UTC; "yesterday" = prior calendar day UTC
 - Aggregate (COUNT, GROUP BY) for volume questions; LIMIT row samples for examples
 
@@ -75,6 +91,23 @@ WHERE interaction_start >= NOW() - INTERVAL '7 days'
 GROUP BY skill_name
 ORDER BY call_count DESC
 LIMIT 20;
+
+Top transcript-derived primary reasons last 7 days:
+SELECT primary_reason, COUNT(*) AS call_count
+FROM analytics_transcript_summaries
+WHERE interaction_start >= NOW() - INTERVAL '7 days'
+  AND upper(replace(call_direction, '-', '_')) LIKE '%IN_BOUND%'
+GROUP BY primary_reason
+ORDER BY call_count DESC
+LIMIT 20;
+
+Sample per-call transcript summaries for a primary reason:
+SELECT segment_id, interaction_start, skill_name, primary_reason, secondary_reason,
+       tertiary_reason, transcript_summary
+FROM analytics_transcript_summaries
+WHERE primary_reason ILIKE '%remake%'
+ORDER BY interaction_start DESC
+LIMIT 10;
 """.strip()
 
 

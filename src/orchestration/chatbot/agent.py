@@ -12,6 +12,8 @@ from orchestration.chatbot.settings import ChatbotSettings
 from orchestration.chatbot.sql_executor import QueryResult, execute_readonly_query, format_results_for_llm
 from orchestration.chatbot.sql_guard import validate_sql
 from orchestration.db.session import get_engine
+from orchestration.rag.retrieve import RetrievedChunk, format_chunks_for_llm, retrieve_knowledge_chunks
+from orchestration.rag.router import route_question
 
 
 def _is_retryable_openai_error(exc: BaseException) -> bool:
@@ -50,6 +52,8 @@ class ChatbotResponse:
     sql: str | None = None
     row_count: int | None = None
     error: str | None = None
+    mode: str = "sql"
+    rag_sources: int = 0
     debug: dict = field(default_factory=dict)
 
 
@@ -60,13 +64,60 @@ class ChatbotAgent:
 
     def ask(self, question: str, *, history: list[tuple[str, str]] | None = None) -> ChatbotResponse:
         history = history or []
+        mode = route_question(question) if self._settings.chatbot_rag_enabled else "sql"
+
+        rag_chunks: list[RetrievedChunk] = []
+        if mode in ("rag", "hybrid") and self._settings.openai_api_key:
+            try:
+                rag_chunks = retrieve_knowledge_chunks(
+                    self._engine,
+                    question,
+                    api_key=self._settings.openai_api_key,
+                    embedding_model=self._settings.openai_embedding_model,
+                    openai_base_url=self._settings.openai_base_url,
+                    top_k=self._settings.chatbot_rag_top_k,
+                    min_similarity=self._settings.chatbot_rag_min_similarity,
+                    timeout_seconds=self._settings.request_timeout_seconds,
+                )
+            except Exception as exc:
+                if mode == "rag":
+                    return ChatbotResponse(
+                        answer=(
+                            "I could not search call examples for that question. "
+                            "Ensure the knowledge index is built "
+                            "(`python scripts/build_knowledge_index.py`) and pgvector is enabled. "
+                            f"Detail: {exc}"
+                        ),
+                        error=str(exc),
+                        mode=mode,
+                    )
+                mode = "sql"
+
+        if mode == "rag":
+            if not rag_chunks:
+                return ChatbotResponse(
+                    answer=(
+                        "I did not find relevant call examples in the knowledge index. "
+                        "Run transcript summarization and "
+                        "`python scripts/build_knowledge_index.py`, then try again."
+                    ),
+                    mode=mode,
+                )
+            try:
+                answer = self._answer_from_rag(question, rag_chunks, history)
+            except Exception as exc:
+                return ChatbotResponse(answer=_format_agent_error(exc), error=str(exc), mode=mode)
+            return ChatbotResponse(answer=answer, mode=mode, rag_sources=len(rag_chunks))
+
+        sql_result: QueryResult | None = None
+        sql: str | None = None
         try:
             sql, sql_error = self._generate_sql(question, history)
         except Exception as exc:
-            return ChatbotResponse(answer=_format_agent_error(exc), error=str(exc))
+            return ChatbotResponse(answer=_format_agent_error(exc), error=str(exc), mode=mode)
 
         if sql_error and not sql:
-            return ChatbotResponse(answer=sql_error, error=sql_error)
+            return ChatbotResponse(answer=sql_error, error=sql_error, mode=mode)
 
         assert sql is not None
         validation = validate_sql(sql, max_limit=self._settings.chatbot_max_rows)
@@ -75,22 +126,24 @@ class ChatbotAgent:
                 answer=f"I could not run that query safely: {validation.error}",
                 sql=sql,
                 error=validation.error,
+                mode=mode,
             )
 
         try:
-            result = execute_readonly_query(
+            sql_result = execute_readonly_query(
                 self._engine,
                 validation.sql,
                 max_rows=self._settings.chatbot_max_rows,
                 timeout_seconds=self._settings.chatbot_query_timeout_seconds,
             )
+            sql = validation.sql
         except Exception as exc:
             corrected = self._retry_sql(question, validation.sql, str(exc))
             if corrected:
                 validation = validate_sql(corrected, max_limit=self._settings.chatbot_max_rows)
                 if validation.ok:
                     try:
-                        result = execute_readonly_query(
+                        sql_result = execute_readonly_query(
                             self._engine,
                             validation.sql,
                             max_rows=self._settings.chatbot_max_rows,
@@ -102,40 +155,98 @@ class ChatbotAgent:
                             answer=f"Query failed: {retry_exc}",
                             sql=validation.sql,
                             error=str(retry_exc),
+                            mode=mode,
                         )
                 else:
                     return ChatbotResponse(
                         answer=f"Query failed: {exc}",
                         sql=validation.sql,
                         error=str(exc),
+                        mode=mode,
                     )
             else:
                 return ChatbotResponse(
                     answer=f"Query failed: {exc}",
                     sql=validation.sql,
                     error=str(exc),
+                    mode=mode,
                 )
 
+        assert sql_result is not None
         try:
-            answer = self._summarize(question, validation.sql, result, history)
+            if mode == "hybrid" and rag_chunks:
+                answer = self._answer_hybrid(question, sql, sql_result, rag_chunks, history)
+            else:
+                answer = self._summarize(question, sql, sql_result, history)
         except Exception as exc:
             return ChatbotResponse(
                 answer=_format_agent_error(exc),
-                sql=validation.sql,
-                row_count=result.row_count,
+                sql=sql,
+                row_count=sql_result.row_count,
                 error=str(exc),
+                mode=mode,
+                rag_sources=len(rag_chunks),
             )
 
         if not answer or not answer.strip():
-            answer = _format_count_answer(question, result)
+            answer = _format_count_answer(question, sql_result)
 
-        if self._settings.chatbot_show_sql:
-            answer = f"{answer}\n\n---\n**SQL used:**\n```sql\n{validation.sql}\n```"
+        if self._settings.chatbot_show_sql and sql:
+            answer = f"{answer}\n\n---\n**SQL used:**\n```sql\n{sql}\n```"
 
         return ChatbotResponse(
             answer=answer,
-            sql=validation.sql,
-            row_count=result.row_count,
+            sql=sql,
+            row_count=sql_result.row_count,
+            mode=mode,
+            rag_sources=len(rag_chunks),
+        )
+
+    def _answer_from_rag(
+        self,
+        question: str,
+        chunks: list[RetrievedChunk],
+        history: list[tuple[str, str]],
+    ) -> str:
+        prompt = (
+            f"Conversation so far:\n{_format_history(history)}\n\n"
+            f"User question: {question}\n\n"
+            "Relevant call examples retrieved by semantic search:\n"
+            f"{format_chunks_for_llm(chunks)}\n\n"
+            "Answer as a contact-center analyst. Use the examples to explain patterns, "
+            "customer intents, and operational recommendations. "
+            "Cite specific skills, reasons, or outcomes from the examples when helpful. "
+            "Do not invent calls or facts not supported by the examples."
+        )
+        return self._chat_completion(
+            system="You answer questions using retrieved call interaction examples (RAG).",
+            user=prompt,
+        )
+
+    def _answer_hybrid(
+        self,
+        question: str,
+        sql: str,
+        result: QueryResult,
+        chunks: list[RetrievedChunk],
+        history: list[tuple[str, str]],
+    ) -> str:
+        data_preview = format_results_for_llm(result)
+        prompt = (
+            f"User question: {question}\n\n"
+            f"Structured analytics query returned {result.row_count} row(s)"
+            f"{' (truncated)' if result.truncated else ''}.\n"
+            f"Results JSON:\n{data_preview}\n\n"
+            "Relevant call examples from semantic search:\n"
+            f"{format_chunks_for_llm(chunks)}\n\n"
+            "Write a clear answer for a contact-center manager that combines:\n"
+            "1) aggregate metrics from the query results\n"
+            "2) contextual insights from the example calls\n"
+            "Do not invent data not present in either source."
+        )
+        return self._chat_completion(
+            system="You combine SQL analytics with retrieved call examples.",
+            user=prompt,
         )
 
     def _generate_sql(

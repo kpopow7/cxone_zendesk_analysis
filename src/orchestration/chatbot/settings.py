@@ -28,6 +28,13 @@ class ChatbotSettings(BaseSettings):
     chatbot_max_rows: int = Field(default=200, alias="CHATBOT_MAX_ROWS")
     chatbot_query_timeout_seconds: float = Field(default=15.0, alias="CHATBOT_QUERY_TIMEOUT_SECONDS")
     chatbot_show_sql: bool = Field(default=True, alias="CHATBOT_SHOW_SQL")
+    chatbot_rag_enabled: bool = Field(default=True, alias="CHATBOT_RAG_ENABLED")
+    chatbot_rag_top_k: int = Field(default=8, alias="CHATBOT_RAG_TOP_K")
+    chatbot_rag_min_similarity: float = Field(default=0.30, alias="CHATBOT_RAG_MIN_SIMILARITY")
+    openai_embedding_model: str = Field(
+        default="text-embedding-3-small",
+        alias="OPENAI_EMBEDDING_MODEL",
+    )
     request_timeout_seconds: float = Field(default=90.0, alias="REQUEST_TIMEOUT_SECONDS")
 
     # Railway / Gradio bind
