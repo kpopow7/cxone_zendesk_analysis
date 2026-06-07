@@ -17,6 +17,69 @@ Both steps use the **same PostgreSQL database** (`DATABASE_URL` in `.env`).
 
 ---
 
+## Full pipeline checklist
+
+Use this as a quick reference. **Phase A–B run on local Docker** (`DATABASE_URL`). **Phase C–D push to Railway** (`TARGET_DATABASE_URL`). Details for each step are in the sections below.
+
+### One-time setup
+
+- [ ] Clone repo, create venv, `pip install -r requirements.txt`
+- [ ] Copy `.env.example` → `.env` (CXone, Zendesk, `OPENAI_API_KEY`, `DATABASE_URL`)
+- [ ] `docker compose up -d` and `python scripts/init_db.py`
+- [ ] Copy configs: `zendesk_field_map.json`, `cxone_zendesk_link.json`, `transcript_summary.json` (from `.example` files)
+- [ ] Railway: create Postgres + web service; set `TARGET_DATABASE_URL` (public proxy URL) in `.env` — see [docs/CHATBOT_RAILWAY.md](docs/CHATBOT_RAILWAY.md)
+
+### Phase A — Load and combine (local)
+
+Run on **`DATABASE_URL`** (localhost:5433). Order matters for Step 3.
+
+- [ ] **Step 1 — CXone transcripts (with text):** `run_cxone_historical_backfill.py` (one-time; enriched transcripts)
+- [ ] **Step 2 — Zendesk tickets:** `run_zendesk_extract.py` (matching date range)
+- [ ] **Step 3 — Build combined dataset:** `run_build_combined_dataset.py --rebuild` (use `--batch-size 25` if OOM; optional `--interaction-start` / `--interaction-end`)
+
+Verify locally:
+
+```powershell
+docker exec -it cxone_zendesk_postgres psql -U orchestration -d orchestration -c "
+SELECT (SELECT COUNT(*) FROM cxone_transcripts) AS cxone,
+       (SELECT COUNT(*) FROM zendesk_tickets) AS zendesk,
+       (SELECT COUNT(*) FROM combined_interactions) AS combined;"
+```
+
+### Phase B — LLM analysis (local, optional)
+
+Requires `OPENAI_API_KEY`.
+
+- [ ] **Step 4 — Ticket-field summary (optional):** `run_interaction_summary.py --timeframe last-week`
+- [ ] **Step 4b — Transcript LLM reasons:** `run_transcript_summary.py --timeframe last-week` (pilot with `--limit 10` first)
+
+### Phase C — Sync to Railway
+
+Run from your PC with **`TARGET_DATABASE_URL`** set. Sync order: lighter tables first; use small batches for large tables.
+
+- [ ] `python scripts/sync_to_railway.py --tables zendesk_tickets`
+- [ ] `python scripts/sync_to_railway.py --tables cxone_transcripts --batch-size 10`
+- [ ] `python scripts/sync_to_railway.py --tables combined_interactions --batch-size 5`
+- [ ] `python scripts/sync_to_railway.py --tables cxone_transcript_analysis` (after Step 4b)
+
+Re-run sync after daily pipeline updates. `sync_to_railway.py` refreshes analytics views on Railway automatically.
+
+### Phase D — RAG + chatbot (Railway)
+
+- [ ] On Railway Postgres → Query: `CREATE EXTENSION IF NOT EXISTS vector;`
+- [ ] Build knowledge index **on Railway DB:** `$env:DATABASE_URL = $env:TARGET_DATABASE_URL` then `python scripts/build_knowledge_index.py --timeframe last-week` — see [docs/RAG.md](docs/RAG.md)
+- [ ] Deploy chatbot (Gradio) with `DATABASE_URL` = Railway **private** URL, `OPENAI_API_KEY`, `CHATBOT_*` auth — [docs/CHATBOT_RAILWAY.md](docs/CHATBOT_RAILWAY.md)
+
+### Daily (ongoing)
+
+- [ ] `python scripts/run_daily_pipeline.py` (CXone list + Zendesk + rebuild combined) — [docs/DAILY_SCHEDULE.md](docs/DAILY_SCHEDULE.md)
+- [ ] Re-sync to Railway (`--sync-railway` flag or `sync_to_railway.py`)
+- [ ] Re-run Step 4b + `build_knowledge_index.py` on new data when you want fresh RAG answers
+
+**Note:** Syncing cxone/zendesk to Railway *before* Step 3 locally is fine — Step 3 only writes to local Postgres. You must run Step 3 locally before syncing `combined_interactions`.
+
+---
+
 ## Shared setup (do once)
 
 ```powershell
@@ -73,6 +136,7 @@ scripts/
   disposition_label_map.json.example # Step 4 disposition labels
   generate_disposition_label_map.py  # Scaffold disposition labels from DB
   sync_to_railway.py               # Copy tables to Railway Postgres
+  build_knowledge_index.py         # RAG embeddings (pgvector)
   railway_analytics_setup.sql      # Analytics view for chatbot
   probe_zendesk.py
 chatbot/
@@ -80,6 +144,7 @@ chatbot/
   Dockerfile                       # Railway deploy
 docs/
   CHATBOT_RAILWAY.md               # Railway DB + chatbot setup
+  RAG.md                           # Knowledge index + hybrid chatbot
   DAILY_SCHEDULE.md                # Schedule daily extracts + combined update
 ```
 
@@ -508,9 +573,11 @@ WHERE link_method = 'call_object_to_parent';
 
 ### Recommended pipeline order
 
+See **[Full pipeline checklist](#full-pipeline-checklist)** above for the complete local → Railway → RAG flow. Short version:
+
 1. **One-time:** `run_cxone_historical_backfill.py` + `run_zendesk_extract.py` (full range) + `run_build_combined_dataset.py --rebuild`
 2. **Daily:** `run_daily_pipeline.py` or scheduled task ([docs/DAILY_SCHEDULE.md](docs/DAILY_SCHEDULE.md))
-3. **Optional:** `run_interaction_summary.py` or Railway chatbot for ad-hoc / NL questions
+3. **Optional:** `run_interaction_summary.py`, `run_transcript_summary.py`, Railway sync, RAG index, chatbot
 
 ---
 
