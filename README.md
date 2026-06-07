@@ -735,7 +735,12 @@ python scripts/run_transcript_summary.py --timeframe last-week `
 
 # Rule-based reduction tips only (no second LLM pass)
 python scripts/run_transcript_summary.py --timeframe last-week --no-reduction-llm
+
+# Large backfill without loading all transcripts into memory
+python scripts/run_transcript_summary.py --timeframe all --batch-size 500 --no-reduction-llm
 ```
+
+**Memory note:** Without `--batch-size`, the full time window is loaded into RAM first. For `--timeframe all` or large ranges, use **`--batch-size 200`** (or smaller if needed). Results are committed per batch; `skip_existing` skips cached rows on re-run.
 
 **Cost note:** Step 4b runs one LLM call per transcript (plus optional reduction calls for top primary reasons). Use `--limit` while tuning prompts, then run the full window.
 

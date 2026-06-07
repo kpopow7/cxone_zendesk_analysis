@@ -66,6 +66,12 @@ from orchestration.steps.transcript_summary import run_transcript_summary_step  
     help="Max transcripts to classify this run (for testing).",
 )
 @click.option(
+    "--batch-size",
+    type=int,
+    default=None,
+    help="Fetch and classify transcripts in DB batches (recommended for --timeframe all).",
+)
+@click.option(
     "--call-direction",
     type=click.Choice(["all", "inbound", "outbound"], case_sensitive=False),
     default=None,
@@ -90,6 +96,7 @@ def main(
     reduction_llm: bool | None,
     reanalyze: bool,
     sample_limit: int | None,
+    batch_size: int | None,
     call_direction: str | None,
     skills_include: tuple[str, ...],
     skills_exclude: tuple[str, ...],
@@ -104,6 +111,8 @@ def main(
     end_dt = parse_iso_datetime(end) if end else None
     if (start and not end) or (end and not start):
         raise click.ClickException("Provide both --start and --end for a custom range.")
+    if batch_size is not None and batch_size < 1:
+        raise click.ClickException("--batch-size must be at least 1.")
 
     try:
         time_window = resolve_time_window(
@@ -130,6 +139,7 @@ def main(
         selection_overrides=selection_overrides,
         reanalyze=reanalyze,
         sample_limit=sample_limit,
+        batch_size=batch_size,
     )
 
     report = result.report

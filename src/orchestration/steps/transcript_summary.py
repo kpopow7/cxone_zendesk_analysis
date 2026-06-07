@@ -26,6 +26,7 @@ def run_transcript_summary_step(
     selection_overrides: CallSelectionOverrides | None = None,
     reanalyze: bool = False,
     sample_limit: int | None = None,
+    batch_size: int | None = None,
 ) -> TranscriptSummaryResult:
     report = run_transcript_summary(
         settings,
@@ -35,5 +36,6 @@ def run_transcript_summary_step(
         selection_overrides=selection_overrides,
         reanalyze=reanalyze,
         sample_limit=sample_limit,
+        batch_size=batch_size,
     )
     return TranscriptSummaryResult(report=report)

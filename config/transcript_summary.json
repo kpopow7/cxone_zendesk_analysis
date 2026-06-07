@@ -7,8 +7,8 @@
     "media_types": ["PhoneCall"]
   },
   "classification": {
-    "max_transcript_chars": 12000,
-    "concurrency": 4,
+    "max_transcript_chars": 10000,
+    "concurrency": 1,
     "store_results": true,
     "skip_existing": true,
     "sample_limit": null

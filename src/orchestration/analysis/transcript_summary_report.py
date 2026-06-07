@@ -7,7 +7,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -104,6 +104,15 @@ class _ClassifiedSegment:
     skill_name: str | None
 
 
+@dataclass
+class _TranscriptRunStats:
+    transcripts_in_window: int = 0
+    transcripts_with_text: int = 0
+    classified_new: int = 0
+    classify_errors: int = 0
+    persisted: int = 0
+
+
 def run_transcript_summary(
     settings: Settings,
     *,
@@ -114,6 +123,7 @@ def run_transcript_summary(
     use_reduction_llm: bool | None = None,
     reanalyze: bool = False,
     sample_limit: int | None = None,
+    batch_size: int | None = None,
 ) -> TranscriptSummaryReport:
     if config is None:
         path = config_path or Path(settings.transcript_summary_config_path)
@@ -137,17 +147,33 @@ def run_transcript_summary(
     ensure_transcript_analysis_table(settings.database_url)
 
     session_factory = get_session_factory(settings.database_url)
+    if batch_size is not None and batch_size < 1:
+        raise ValueError("batch_size must be at least 1")
+
     with session_factory() as session:
-        rows = _fetch_transcripts(session, time_window)
-        return _build_report(
+        if batch_size is None:
+            rows = _fetch_transcripts(session, time_window)
+            return _build_report(
+                session,
+                rows,
+                time_window=time_window,
+                config=config,
+                settings=settings,
+                api_key=api_key,
+                use_reduction_llm=use_reduction_llm,
+                reanalyze=reanalyze,
+                batch_size=None,
+            )
+
+        return _build_report_batched(
             session,
-            rows,
             time_window=time_window,
             config=config,
             settings=settings,
             api_key=api_key,
             use_reduction_llm=use_reduction_llm,
             reanalyze=reanalyze,
+            batch_size=batch_size,
         )
 
 
@@ -163,9 +189,64 @@ def _fetch_transcripts(
     return list(session.scalars(stmt).all())
 
 
-def _build_report(
+def _fetch_transcripts(
     session: Session,
+    time_window: TimeWindow,
+) -> list[CxoneTranscriptRow]:
+    stmt = select(CxoneTranscriptRow)
+    if time_window.start is not None:
+        stmt = stmt.where(CxoneTranscriptRow.interaction_start >= time_window.start)
+    if time_window.end is not None:
+        stmt = stmt.where(CxoneTranscriptRow.interaction_start <= time_window.end)
+    return list(session.scalars(stmt).all())
+
+
+def _iter_transcript_batches(
+    session: Session,
+    time_window: TimeWindow,
+    batch_size: int,
+) -> Iterator[list[CxoneTranscriptRow]]:
+    """Yield transcript rows in fixed-size chunks (keyset pagination on segment_id)."""
+    cursor = ""
+    while True:
+        stmt = select(CxoneTranscriptRow).where(CxoneTranscriptRow.segment_id > cursor)
+        if time_window.start is not None:
+            stmt = stmt.where(CxoneTranscriptRow.interaction_start >= time_window.start)
+        if time_window.end is not None:
+            stmt = stmt.where(CxoneTranscriptRow.interaction_start <= time_window.end)
+        stmt = stmt.order_by(CxoneTranscriptRow.segment_id.asc()).limit(batch_size)
+        batch = list(session.scalars(stmt).all())
+        if not batch:
+            break
+        yield batch
+        cursor = batch[-1].segment_id
+        session.expunge_all()
+
+
+def _filter_transcript_rows(
     rows: list[CxoneTranscriptRow],
+    config: TranscriptSummaryConfig,
+    *,
+    sample_remaining: int | None,
+) -> tuple[list[CxoneTranscriptRow], int | None]:
+    """Return filtered rows and updated sample budget."""
+    filtered: list[CxoneTranscriptRow] = []
+    remaining = sample_remaining
+    for row in rows:
+        if not row_matches_segment_filters(row, config.call_selection):
+            continue
+        if not (row.transcript_text or "").strip():
+            continue
+        if remaining is not None:
+            if remaining <= 0:
+                break
+            remaining -= 1
+        filtered.append(row)
+    return filtered, remaining
+
+
+def _build_report_batched(
+    session: Session,
     *,
     time_window: TimeWindow,
     config: TranscriptSummaryConfig,
@@ -173,23 +254,83 @@ def _build_report(
     api_key: str,
     use_reduction_llm: bool | None,
     reanalyze: bool,
+    batch_size: int,
 ) -> TranscriptSummaryReport:
-    generated_at = datetime.now(timezone.utc).isoformat()
-    filtered: list[CxoneTranscriptRow] = []
-    for row in rows:
-        if not row_matches_segment_filters(row, config.call_selection):
-            continue
-        if not (row.transcript_text or "").strip():
-            continue
-        filtered.append(row)
+    stats = _TranscriptRunStats()
+    segments: list[_ClassifiedSegment] = []
+    sample_remaining = config.classification.sample_limit
+    batch_index = 0
+    stop = False
 
-    if config.classification.sample_limit is not None:
-        filtered = filtered[: config.classification.sample_limit]
+    for batch_rows in _iter_transcript_batches(session, time_window, batch_size):
+        if stop:
+            break
+        batch_index += 1
+        stats.transcripts_in_window += len(batch_rows)
+        stats.transcripts_with_text += sum(
+            1 for row in batch_rows if (row.transcript_text or "").strip()
+        )
 
-    existing = _load_cached_analyses(
+        filtered, sample_remaining = _filter_transcript_rows(
+            batch_rows,
+            config,
+            sample_remaining=sample_remaining,
+        )
+
+        batch_segments, classified_new, errors, persisted = _classify_and_persist_batch(
+            session,
+            filtered,
+            config=config,
+            settings=settings,
+            api_key=api_key,
+            reanalyze=reanalyze,
+        )
+        segments.extend(batch_segments)
+        stats.classified_new += classified_new
+        stats.classify_errors += errors
+        stats.persisted += persisted
+
+        logger.info(
+            "Transcript summary batch %s: fetched=%s filtered=%s classified_new=%s total_segments=%s",
+            batch_index,
+            len(batch_rows),
+            len(filtered),
+            classified_new,
+            len(segments),
+        )
+
+        if sample_remaining is not None and sample_remaining <= 0:
+            stop = True
+
+    if stats.persisted:
+        ensure_analytics_views(get_engine(settings.database_url))
+
+    return _assemble_report(
         session,
-        {row.segment_id for row in filtered},
+        segments=segments,
+        stats=stats,
+        time_window=time_window,
+        config=config,
+        settings=settings,
+        api_key=api_key,
+        use_reduction_llm=use_reduction_llm,
+        batch_size=batch_size,
     )
+
+
+def _classify_and_persist_batch(
+    session: Session,
+    filtered: list[CxoneTranscriptRow],
+    *,
+    config: TranscriptSummaryConfig,
+    settings: Settings,
+    api_key: str,
+    reanalyze: bool,
+) -> tuple[list[_ClassifiedSegment], int, int, int]:
+    if not filtered:
+        return [], 0, 0, 0
+
+    existing = _load_cached_analyses(session, {row.segment_id for row in filtered})
     skip_existing = config.classification.skip_existing and not reanalyze
 
     to_classify: list[CxoneTranscriptRow] = []
@@ -213,11 +354,8 @@ def _build_report(
             model=settings.openai_model,
         )
         session.commit()
-        ensure_analytics_views(get_engine(settings.database_url))
 
-    analyses: dict[str, TranscriptReasonAnalysis] = {}
-    for segment_id, row in existing.items():
-        analyses[segment_id] = row
+    analyses: dict[str, TranscriptReasonAnalysis] = dict(existing)
     analyses.update(classified_new)
 
     segments: list[_ClassifiedSegment] = []
@@ -234,6 +372,87 @@ def _build_report(
             )
         )
 
+    return segments, len(classified_new), classify_errors, persisted_count
+
+
+def _fetch_transcript_texts(session: Session, segment_ids: set[str]) -> dict[str, str]:
+    if not segment_ids:
+        return {}
+
+    texts: dict[str, str] = {}
+    ids = list(segment_ids)
+    for offset in range(0, len(ids), _CACHE_LOOKUP_BATCH_SIZE):
+        batch = ids[offset : offset + _CACHE_LOOKUP_BATCH_SIZE]
+        stmt = select(CxoneTranscriptRow.segment_id, CxoneTranscriptRow.transcript_text).where(
+            CxoneTranscriptRow.segment_id.in_(batch)
+        )
+        for segment_id, transcript_text in session.execute(stmt).all():
+            texts[str(segment_id)] = transcript_text or ""
+    return texts
+
+
+def _build_report(
+    session: Session,
+    rows: list[CxoneTranscriptRow],
+    *,
+    time_window: TimeWindow,
+    config: TranscriptSummaryConfig,
+    settings: Settings,
+    api_key: str,
+    use_reduction_llm: bool | None,
+    reanalyze: bool,
+    batch_size: int | None = None,
+) -> TranscriptSummaryReport:
+    filtered, _ = _filter_transcript_rows(
+        rows,
+        config,
+        sample_remaining=config.classification.sample_limit,
+    )
+    stats = _TranscriptRunStats(
+        transcripts_in_window=len(rows),
+        transcripts_with_text=sum(1 for r in rows if (r.transcript_text or "").strip()),
+    )
+    segments, classified_new, errors, persisted = _classify_and_persist_batch(
+        session,
+        filtered,
+        config=config,
+        settings=settings,
+        api_key=api_key,
+        reanalyze=reanalyze,
+    )
+    stats.classified_new = classified_new
+    stats.classify_errors = errors
+    stats.persisted = persisted
+
+    if stats.persisted:
+        ensure_analytics_views(get_engine(settings.database_url))
+
+    return _assemble_report(
+        session,
+        segments=segments,
+        stats=stats,
+        time_window=time_window,
+        config=config,
+        settings=settings,
+        api_key=api_key,
+        use_reduction_llm=use_reduction_llm,
+        batch_size=batch_size,
+    )
+
+
+def _assemble_report(
+    session: Session,
+    *,
+    segments: list[_ClassifiedSegment],
+    stats: _TranscriptRunStats,
+    time_window: TimeWindow,
+    config: TranscriptSummaryConfig,
+    settings: Settings,
+    api_key: str,
+    use_reduction_llm: bool | None,
+    batch_size: int | None,
+) -> TranscriptSummaryReport:
+    generated_at = datetime.now(timezone.utc).isoformat()
     total = len(segments)
     buckets = _aggregate_primary_buckets(segments, total=total, config=config)
 
@@ -244,18 +463,26 @@ def _build_report(
     )
     llm_meta: dict[str, Any] = {
         "classification_model": settings.openai_model,
-        "segments_classified_this_run": len(classified_new),
-        "classification_errors": classify_errors,
+        "segments_classified_this_run": stats.classified_new,
+        "classification_errors": stats.classify_errors,
         "reduction_llm_requested": reduction_requested,
         "reduction_llm_applied": False,
         "reduction_reasons_processed": 0,
     }
 
     if reduction_requested and api_key:
-        transcript_by_segment = {
-            row.segment_id: row.transcript_text or ""
-            for row in filtered
-        }
+        sample_ids: set[str] = set()
+        segments_by_primary: dict[str, list[_ClassifiedSegment]] = defaultdict(list)
+        for item in segments:
+            primary_key, _, _ = reason_keys(item.analysis)
+            segments_by_primary[primary_key].append(item)
+        for bucket in buckets[: config.reduction_recommendations.top_primary_reasons]:
+            primary_segments = segments_by_primary.get(bucket.primary_key, [])
+            ranked_ids = _rank_segment_ids_for_sampling(primary_segments)
+            for segment_id in ranked_ids[: config.reduction_recommendations.samples_per_primary]:
+                sample_ids.add(segment_id)
+
+        transcript_by_segment = _fetch_transcript_texts(session, sample_ids)
         analysis_by_segment = {s.segment_id: s.analysis for s in segments}
         _enrich_reduction_recommendations(
             buckets,
@@ -271,23 +498,33 @@ def _build_report(
     _apply_rule_recommendations(buckets)
 
     totals = {
-        "transcripts_in_window": len(rows),
-        "transcripts_with_text": sum(1 for r in rows if (r.transcript_text or "").strip()),
+        "transcripts_in_window": stats.transcripts_in_window,
+        "transcripts_with_text": stats.transcripts_with_text,
         "transcripts_analyzed": total,
-        "transcripts_classified_this_run": len(classified_new),
-        "transcripts_persisted_this_run": persisted_count,
-        "transcripts_reused_from_cache": total - len(classified_new),
-        "classification_error_count": classify_errors,
+        "transcripts_classified_this_run": stats.classified_new,
+        "transcripts_persisted_this_run": stats.persisted,
+        "transcripts_reused_from_cache": total - stats.classified_new,
+        "classification_error_count": stats.classify_errors,
         "summaries_in_database": total if config.classification.store_results else 0,
     }
 
     insights = _build_insights(
-        rows_considered=len(rows),
+        rows_considered=stats.transcripts_in_window,
         total=total,
         buckets=buckets,
         call_selection=config.call_selection,
-        classify_errors=classify_errors,
+        classify_errors=stats.classify_errors,
     )
+
+    classification_meta: dict[str, Any] = {
+        "max_transcript_chars": config.classification.max_transcript_chars,
+        "concurrency": config.classification.concurrency,
+        "store_results": config.classification.store_results,
+        "skip_existing": config.classification.skip_existing,
+        "sample_limit": config.classification.sample_limit,
+    }
+    if batch_size is not None:
+        classification_meta["batch_size"] = batch_size
 
     return TranscriptSummaryReport(
         generated_at=generated_at,
@@ -299,13 +536,7 @@ def _build_report(
         },
         filters=config.call_selection.to_dict(),
         totals=totals,
-        classification={
-            "max_transcript_chars": config.classification.max_transcript_chars,
-            "concurrency": config.classification.concurrency,
-            "store_results": config.classification.store_results,
-            "skip_existing": config.classification.skip_existing,
-            "sample_limit": config.classification.sample_limit,
-        },
+        classification=classification_meta,
         top_primary_reasons=buckets,
         insights=insights,
         llm=llm_meta,
