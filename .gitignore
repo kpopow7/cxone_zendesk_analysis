@@ -2,6 +2,7 @@
 .env
 .env.*
 !.env.example
+.env_archive
 
 # --- Local / tenant config (copy from *.example) ---
 config/zendesk_field_map.json
