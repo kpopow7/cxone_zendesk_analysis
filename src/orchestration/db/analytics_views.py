@@ -22,6 +22,7 @@ SELECT
     segment_summary,
     left(transcript_text, 2000) AS transcript_preview,
     ticket_subject,
+    ticket_description,
     ticket_status,
     ticket_priority,
     ticket_tags,
@@ -65,5 +66,7 @@ JOIN cxone_transcripts AS t ON t.segment_id = a.segment_id
 def ensure_analytics_views(engine: Engine) -> None:
     """Create or refresh analytics views used by the chatbot and reporting."""
     with engine.begin() as connection:
+        # Postgres CREATE OR REPLACE cannot insert columns mid-view; drop first.
+        connection.execute(text("DROP VIEW IF EXISTS analytics_interactions CASCADE"))
         connection.execute(text(ANALYTICS_INTERACTIONS_VIEW))
         connection.execute(text(ANALYTICS_TRANSCRIPT_SUMMARIES_VIEW))

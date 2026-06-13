@@ -59,8 +59,16 @@ python scripts/build_knowledge_index.py --timeframe last-week
 # All classified calls with transcript or ticket context
 python scripts/build_knowledge_index.py --timeframe all
 
-# Last week only
+# Relative windows (UTC)
 python scripts/build_knowledge_index.py --timeframe last-week
+python scripts/build_knowledge_index.py --timeframe yesterday
+python scripts/build_knowledge_index.py --timeframe last-7-days
+
+# Custom date range (filters on interaction_start; --timeframe is ignored)
+python scripts/build_knowledge_index.py --start 2026-03-05 --end 2026-03-11
+python scripts/build_knowledge_index.py `
+  --start 2026-03-05T00:00:00Z `
+  --end 2026-03-11T23:59:59Z
 
 # Pilot
 python scripts/build_knowledge_index.py --timeframe yesterday --limit 50

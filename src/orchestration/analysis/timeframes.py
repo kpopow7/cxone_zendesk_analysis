@@ -40,6 +40,25 @@ def _previous_calendar_week(reference: datetime) -> tuple[datetime, datetime]:
     return _utc_day_bounds(last_monday)[0], _utc_day_bounds(last_sunday)[1]
 
 
+def parse_window_bound(value: str, *, is_end: bool) -> datetime:
+    """Parse an ISO-8601 window bound.
+
+    Date-only values (YYYY-MM-DD) expand to UTC start or end of that day.
+    Naive datetimes are treated as UTC.
+    """
+    stripped = value.strip()
+    if len(stripped) == 10 and stripped[4] == "-" and stripped[7] == "-":
+        day = date.fromisoformat(stripped)
+        start, end = _utc_day_bounds(day)
+        return end if is_end else start
+
+    normalized = stripped.replace("Z", "+00:00")
+    parsed = datetime.fromisoformat(normalized)
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed
+
+
 def resolve_time_window(
     *,
     preset: str | None = None,
@@ -110,3 +129,61 @@ def resolve_time_window(
         f"Unknown timeframe preset: {preset!r}. "
         "Use all, yesterday, last-week, last-7-days, or --start/--end."
     )
+
+
+def iter_time_window_chunks(
+    window: TimeWindow,
+    chunk_days: int,
+    *,
+    now: datetime | None = None,
+) -> list[TimeWindow]:
+    """Split a bounded window into consecutive UTC day chunks (inclusive end dates)."""
+    if chunk_days < 1:
+        raise ValueError("chunk_days must be at least 1")
+
+    effective = window
+    if window.is_unbounded:
+        reference = now or datetime.now(timezone.utc)
+        if reference.tzinfo is None:
+            reference = reference.replace(tzinfo=timezone.utc)
+        effective = TimeWindow(
+            preset=window.preset,
+            start=datetime(1970, 1, 1, tzinfo=timezone.utc),
+            end=reference,
+            label=f"all time through {reference.date().isoformat()} UTC",
+        )
+
+    if effective.start is None or effective.end is None:
+        raise ValueError("Cannot chunk an unbounded time window without --start and --end")
+
+    if effective.end <= effective.start:
+        raise ValueError("end must be after start")
+
+    chunks: list[TimeWindow] = []
+    chunk_start = effective.start
+    one_day = timedelta(days=1)
+
+    while chunk_start <= effective.end:
+        chunk_end_date = min(
+            (chunk_start + timedelta(days=chunk_days - 1)).date(),
+            effective.end.date(),
+        )
+        _, chunk_end = _utc_day_bounds(chunk_end_date)
+        chunk_end = min(chunk_end, effective.end)
+
+        label = (
+            f"{chunk_start.date().isoformat()} to {chunk_end.date().isoformat()} UTC"
+        )
+        chunks.append(
+            TimeWindow(
+                preset=effective.preset,
+                start=chunk_start,
+                end=chunk_end,
+                label=label,
+            )
+        )
+
+        next_day = chunk_end_date + one_day
+        chunk_start = datetime.combine(next_day, time.min, tzinfo=timezone.utc)
+
+    return chunks

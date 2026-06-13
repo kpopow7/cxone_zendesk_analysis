@@ -2,7 +2,9 @@
 -- Railway dashboard -> Postgres -> Query, or: psql "$DATABASE_URL" -f scripts/railway_analytics_setup.sql
 -- Also applied automatically by init_db.py and sync_to_railway.py.
 
-CREATE OR REPLACE VIEW analytics_interactions AS
+DROP VIEW IF EXISTS analytics_interactions CASCADE;
+
+CREATE VIEW analytics_interactions AS
 SELECT
     segment_id,
     ticket_id,
@@ -20,6 +22,7 @@ SELECT
     segment_summary,
     left(transcript_text, 2000) AS transcript_preview,
     ticket_subject,
+    ticket_description,
     ticket_status,
     ticket_priority,
     ticket_tags,

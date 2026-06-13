@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from collections.abc import Callable
 from typing import Any
 
 from sqlalchemy import text
@@ -67,16 +68,24 @@ def build_knowledge_index(
     batch_size: int = 32,
     limit: int | None = None,
     timeout_seconds: float = 90.0,
+    on_progress: Callable[[str], None] | None = None,
 ) -> IndexBuildResult:
+    def log(message: str) -> None:
+        if on_progress is not None:
+            on_progress(message)
+
     ensure_knowledge_schema(engine, required=True)
 
+    log("Fetching source rows...")
     rows = _fetch_source_rows(engine, start=start, end=end, limit=limit)
     documents: list[KnowledgeDocument] = []
     for row in rows:
         document = build_call_interaction_document(dict(row))
         if document is not None:
             documents.append(document)
+    log(f"Fetched {len(rows)} row(s), {len(documents)} document(s) to index.")
 
+    log("Checking existing embeddings...")
     existing_hashes = _load_existing_hashes(engine, [doc.chunk_id for doc in documents])
     to_embed: list[KnowledgeDocument] = [
         doc for doc in documents if existing_hashes.get(doc.chunk_id) != doc.content_hash
@@ -85,8 +94,18 @@ def build_knowledge_index(
     embedded = 0
     errors = 0
 
+    total_batches = 0
+    log_interval = 1
+    if not to_embed:
+        log("Nothing to embed — index is up to date.")
+    else:
+        total_batches = (len(to_embed) + batch_size - 1) // batch_size
+        log_interval = max(1, total_batches // 10)
+        log(f"Embedding {len(to_embed)} document(s) in {total_batches} batch(es) ({skipped} unchanged).")
+
     for offset in range(0, len(to_embed), batch_size):
         batch = to_embed[offset : offset + batch_size]
+        batch_num = offset // batch_size + 1
         try:
             vectors = embed_texts(
                 [doc.content for doc in batch],
@@ -95,8 +114,9 @@ def build_knowledge_index(
                 base_url=openai_base_url,
                 timeout_seconds=timeout_seconds,
             )
-        except Exception:
+        except Exception as exc:
             errors += len(batch)
+            log(f"ERROR: batch {batch_num}/{total_batches} failed ({len(batch)} docs): {exc}")
             continue
 
         now = datetime.now(timezone.utc)
@@ -147,7 +167,14 @@ def build_knowledge_index(
                 )
                 embedded += 1
 
+        if batch_num == 1 or batch_num == total_batches or batch_num % log_interval == 0:
+            log(
+                f"Embedding progress: batch {batch_num}/{total_batches} "
+                f"({embedded}/{len(to_embed)} embedded, {errors} errors)"
+            )
+
     if embedded >= 100:
+        log("Creating vector index...")
         ensure_knowledge_schema(engine, create_vector_index=True)
 
     return IndexBuildResult(

@@ -15,6 +15,7 @@ if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
 from orchestration.analysis.call_selection import CallSelectionOverrides  # noqa: E402
+from orchestration.analysis.transcript_summary_progress import TranscriptSummaryProgress  # noqa: E402
 from orchestration.analysis.timeframes import resolve_time_window  # noqa: E402
 from orchestration.analysis.transcript_summary_report import (  # noqa: E402
     format_report_text,
@@ -36,8 +37,16 @@ from orchestration.steps.transcript_summary import run_transcript_summary_step  
     default="last-week",
     help="Preset window (default: last-week = previous Mon–Sun UTC).",
 )
-@click.option("--start", default=None, help="Custom range start (ISO-8601); overrides preset start.")
-@click.option("--end", default=None, help="Custom range end (ISO-8601); overrides preset end.")
+@click.option(
+    "--start",
+    default=None,
+    help="Custom range start (ISO-8601, e.g. 2026-03-05T00:00:00Z). Requires --end.",
+)
+@click.option(
+    "--end",
+    default=None,
+    help="Custom range end (ISO-8601, e.g. 2026-03-11T23:59:59Z). Requires --start.",
+)
 @click.option(
     "--config",
     "config_path",
@@ -69,7 +78,25 @@ from orchestration.steps.transcript_summary import run_transcript_summary_step  
     "--batch-size",
     type=int,
     default=None,
-    help="Fetch and classify transcripts in DB batches (recommended for --timeframe all).",
+    help="Rows per DB fetch (default 50 for large/batched runs).",
+)
+@click.option(
+    "--chunk-days",
+    type=int,
+    default=None,
+    help="Split the time window into N-day UTC chunks (recommended for --timeframe all).",
+)
+@click.option(
+    "--commit-every",
+    type=int,
+    default=None,
+    help="Commit to Postgres after this many successful classifications (default 10 in batch mode).",
+)
+@click.option(
+    "--full-report",
+    is_flag=True,
+    default=False,
+    help="Build full reason breakdown at end (slow for large windows; default is classify-only).",
 )
 @click.option(
     "--call-direction",
@@ -97,6 +124,9 @@ def main(
     reanalyze: bool,
     sample_limit: int | None,
     batch_size: int | None,
+    chunk_days: int | None,
+    commit_every: int | None,
+    full_report: bool,
     call_direction: str | None,
     skills_include: tuple[str, ...],
     skills_exclude: tuple[str, ...],
@@ -113,15 +143,34 @@ def main(
         raise click.ClickException("Provide both --start and --end for a custom range.")
     if batch_size is not None and batch_size < 1:
         raise click.ClickException("--batch-size must be at least 1.")
+    if chunk_days is not None and chunk_days < 1:
+        raise click.ClickException("--chunk-days must be at least 1.")
+    if commit_every is not None and commit_every < 1:
+        raise click.ClickException("--commit-every must be at least 1.")
 
     try:
         time_window = resolve_time_window(
-            preset=timeframe_preset if not (start_dt or end_dt) else timeframe_preset,
+            preset=timeframe_preset,
             start=start_dt,
             end=end_dt,
         )
     except ValueError as exc:
         raise click.ClickException(str(exc)) from exc
+
+    large_window = time_window.is_unbounded or timeframe_preset.lower() == "all"
+    if large_window and batch_size is None and chunk_days is None:
+        chunk_days = 7
+        batch_size = 50
+        click.echo(
+            "Large window detected — using --chunk-days 7 --batch-size 50 "
+            "(override with explicit flags).",
+            err=True,
+        )
+    if (batch_size is not None or chunk_days is not None) and commit_every is None:
+        commit_every = 10
+
+    progress = TranscriptSummaryProgress.stderr()
+    progress.info(f"Starting transcript summary for: {time_window.label}")
 
     selection_overrides = _build_selection_overrides(
         call_direction=call_direction,
@@ -140,6 +189,10 @@ def main(
         reanalyze=reanalyze,
         sample_limit=sample_limit,
         batch_size=batch_size,
+        chunk_days=chunk_days,
+        commit_every=commit_every,
+        classify_only=not full_report,
+        progress=progress,
     )
 
     report = result.report

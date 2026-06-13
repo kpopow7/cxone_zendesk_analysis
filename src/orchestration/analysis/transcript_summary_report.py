@@ -9,7 +9,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterator
 
-from sqlalchemy import select
+from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 
 from orchestration.analysis.call_selection import (
@@ -18,9 +18,11 @@ from orchestration.analysis.call_selection import (
     row_matches_segment_filters,
 )
 from orchestration.analysis.importance import score_reason_bucket
+from orchestration.analysis.llm_client import validate_openai_api_key
+from orchestration.analysis.transcript_summary_progress import TranscriptSummaryProgress
 from orchestration.analysis.reasons import is_negative_sentiment, normalize_reason_key
 from orchestration.analysis.recommendations import recommendations_for_reason
-from orchestration.analysis.timeframes import TimeWindow
+from orchestration.analysis.timeframes import TimeWindow, iter_time_window_chunks
 from orchestration.analysis.transcript_reason_llm import (
     TranscriptClassificationError,
     TranscriptReasonAnalysis,
@@ -124,6 +126,10 @@ def run_transcript_summary(
     reanalyze: bool = False,
     sample_limit: int | None = None,
     batch_size: int | None = None,
+    chunk_days: int | None = None,
+    commit_every: int | None = None,
+    classify_only: bool = False,
+    progress: TranscriptSummaryProgress | None = None,
 ) -> TranscriptSummaryReport:
     if config is None:
         path = config_path or Path(settings.transcript_summary_config_path)
@@ -144,11 +150,44 @@ def run_transcript_summary(
     if not api_key:
         raise ValueError("OPENAI_API_KEY is required for transcript summary (LLM classification)")
 
+    progress = progress or TranscriptSummaryProgress.stderr()
+    validate_openai_api_key(
+        api_key=api_key,
+        model=settings.openai_model,
+        base_url=settings.openai_base_url,
+        timeout_seconds=min(settings.request_timeout_seconds, 30.0),
+    )
+    progress.info("OpenAI API key validated.")
+
     ensure_transcript_analysis_table(settings.database_url)
 
     session_factory = get_session_factory(settings.database_url)
     if batch_size is not None and batch_size < 1:
         raise ValueError("batch_size must be at least 1")
+    if chunk_days is not None and chunk_days < 1:
+        raise ValueError("chunk_days must be at least 1")
+    if commit_every is not None and commit_every < 1:
+        raise ValueError("commit_every must be at least 1")
+
+    in_batch_mode = batch_size is not None or chunk_days is not None
+    effective_commit_every = commit_every if commit_every is not None else (10 if in_batch_mode else None)
+    effective_classify_only = classify_only or in_batch_mode
+
+    if chunk_days is not None:
+        return _run_transcript_summary_by_date_chunks(
+            session_factory,
+            time_window=time_window,
+            config=config,
+            settings=settings,
+            api_key=api_key,
+            use_reduction_llm=use_reduction_llm,
+            reanalyze=reanalyze,
+            batch_size=batch_size,
+            chunk_days=chunk_days,
+            commit_every=effective_commit_every or 10,
+            classify_only=effective_classify_only,
+            progress=progress,
+        )
 
     with session_factory() as session:
         if batch_size is None:
@@ -163,6 +202,7 @@ def run_transcript_summary(
                 use_reduction_llm=use_reduction_llm,
                 reanalyze=reanalyze,
                 batch_size=None,
+                progress=progress,
             )
 
         return _build_report_batched(
@@ -174,6 +214,9 @@ def run_transcript_summary(
             use_reduction_llm=use_reduction_llm,
             reanalyze=reanalyze,
             batch_size=batch_size,
+            commit_every=effective_commit_every or 10,
+            classify_only=effective_classify_only,
+            progress=progress,
         )
 
 
@@ -181,40 +224,253 @@ def _fetch_transcripts(
     session: Session,
     time_window: TimeWindow,
 ) -> list[CxoneTranscriptRow]:
+    stmt = _transcript_query_for_window(time_window)
+    return list(session.scalars(stmt).all())
+
+
+def _transcript_query_for_window(time_window: TimeWindow):
     stmt = select(CxoneTranscriptRow)
     if time_window.start is not None:
         stmt = stmt.where(CxoneTranscriptRow.interaction_start >= time_window.start)
     if time_window.end is not None:
         stmt = stmt.where(CxoneTranscriptRow.interaction_start <= time_window.end)
-    return list(session.scalars(stmt).all())
+    return stmt
 
 
-def _fetch_transcripts(
+def _run_transcript_summary_by_date_chunks(
+    session_factory,
+    *,
+    time_window: TimeWindow,
+    config: TranscriptSummaryConfig,
+    settings: Settings,
+    api_key: str,
+    use_reduction_llm: bool | None,
+    reanalyze: bool,
+    batch_size: int | None,
+    chunk_days: int,
+    commit_every: int,
+    classify_only: bool,
+    progress: TranscriptSummaryProgress,
+) -> TranscriptSummaryReport:
+    """Classify transcripts in consecutive date windows; commit frequently within each."""
+    chunks = iter_time_window_chunks(time_window, chunk_days)
+    effective_batch_size = batch_size if batch_size is not None else 50
+    combined_stats = _TranscriptRunStats()
+    chunk_summaries: list[str] = []
+
+    progress.info(
+        f"Date-chunked run: {len(chunks)} chunk(s) of up to {chunk_days} day(s), "
+        f"batch_size={effective_batch_size}, commit_every={commit_every}"
+    )
+
+    for index, chunk_window in enumerate(chunks, start=1):
+        progress.info(
+            f"Date chunk {index}/{len(chunks)}: {chunk_window.label}"
+        )
+        with session_factory() as session:
+            chunk_report = _build_report_batched(
+                session,
+                time_window=chunk_window,
+                config=config,
+                settings=settings,
+                api_key=api_key,
+                use_reduction_llm=False,
+                reanalyze=reanalyze,
+                batch_size=effective_batch_size,
+                commit_every=commit_every,
+                classify_only=True,
+                progress=progress,
+            )
+
+        totals = chunk_report.totals
+        combined_stats.transcripts_in_window += int(totals.get("transcripts_in_window", 0))
+        combined_stats.transcripts_with_text += int(totals.get("transcripts_with_text", 0))
+        combined_stats.classified_new += int(totals.get("transcripts_classified_this_run", 0))
+        combined_stats.classify_errors += int(totals.get("classification_error_count", 0))
+        combined_stats.persisted += int(totals.get("transcripts_persisted_this_run", 0))
+        chunk_summaries.append(
+            f"{chunk_window.label}: classified {totals.get('transcripts_classified_this_run', 0)}, "
+            f"persisted {totals.get('transcripts_persisted_this_run', 0)}, "
+            f"errors {totals.get('classification_error_count', 0)}"
+        )
+
+    with session_factory() as session:
+        if combined_stats.persisted:
+            ensure_analytics_views(get_engine(settings.database_url))
+
+        if classify_only:
+            report = _minimal_report(
+                session,
+                stats=combined_stats,
+                time_window=time_window,
+                config=config,
+                settings=settings,
+                batch_size=effective_batch_size,
+                chunk_days=chunk_days,
+                commit_every=commit_every,
+                use_reduction_llm=use_reduction_llm,
+            )
+        else:
+            segments = _load_classified_segments_from_db(session, time_window, config)
+            report = _assemble_report(
+                session,
+                segments=segments,
+                stats=combined_stats,
+                time_window=time_window,
+                config=config,
+                settings=settings,
+                api_key=api_key,
+                use_reduction_llm=use_reduction_llm,
+                batch_size=effective_batch_size,
+                chunk_days=chunk_days,
+                commit_every=commit_every,
+            )
+
+    report.insights.insert(
+        0,
+        f"Processed {len(chunks)} date chunk(s); committed to cxone_transcript_analysis "
+        f"every {commit_every} successful classification(s).",
+    )
+    for summary in chunk_summaries:
+        report.insights.append(summary)
+
+    return report
+
+
+def _load_classified_segments_from_db(
     session: Session,
     time_window: TimeWindow,
-) -> list[CxoneTranscriptRow]:
+    config: TranscriptSummaryConfig,
+) -> list[_ClassifiedSegment]:
+    """Load analysis rows for report aggregation (no transcript text)."""
+    stmt = (
+        select(CxoneTranscriptRow, CxoneTranscriptAnalysisRow)
+        .join(
+            CxoneTranscriptAnalysisRow,
+            CxoneTranscriptAnalysisRow.segment_id == CxoneTranscriptRow.segment_id,
+        )
+    )
+    if time_window.start is not None:
+        stmt = stmt.where(CxoneTranscriptRow.interaction_start >= time_window.start)
+    if time_window.end is not None:
+        stmt = stmt.where(CxoneTranscriptRow.interaction_start <= time_window.end)
+
+    segments: list[_ClassifiedSegment] = []
+    for transcript_row, analysis_row in session.execute(stmt).yield_per(500):
+        if not row_matches_segment_filters(transcript_row, config.call_selection):
+            continue
+        segments.append(
+            _ClassifiedSegment(
+                segment_id=transcript_row.segment_id,
+                analysis=_analysis_from_db_row(analysis_row),
+                client_sentiment=transcript_row.client_sentiment,
+                skill_name=transcript_row.skill_name,
+            )
+        )
+    return segments
+
+
+def _apply_segment_filters_sql(stmt, filters):
+    direction = filters.call_direction.strip().lower()
+    if direction == "inbound":
+        normalized = func.upper(func.replace(CxoneTranscriptRow.call_direction, "-", "_"))
+        stmt = stmt.where(or_(normalized.like("%IN_BOUND%"), normalized == "INBOUND"))
+    elif direction == "outbound":
+        normalized = func.upper(func.replace(CxoneTranscriptRow.call_direction, "-", "_"))
+        stmt = stmt.where(or_(normalized.like("%OUT_BOUND%"), normalized == "OUTBOUND"))
+
+    if filters.media_types_include:
+        stmt = stmt.where(CxoneTranscriptRow.media_type.in_(list(filters.media_types_include)))
+    if filters.media_types_exclude:
+        stmt = stmt.where(
+            CxoneTranscriptRow.media_type.notin_(list(filters.media_types_exclude))
+        )
+    if filters.skills_include:
+        stmt = stmt.where(CxoneTranscriptRow.skill_name.in_(list(filters.skills_include)))
+    if filters.skills_exclude:
+        stmt = stmt.where(
+            CxoneTranscriptRow.skill_name.notin_(list(filters.skills_exclude))
+        )
+    if filters.teams_include:
+        stmt = stmt.where(CxoneTranscriptRow.team_name.in_(list(filters.teams_include)))
+    if filters.teams_exclude:
+        stmt = stmt.where(CxoneTranscriptRow.team_name.notin_(list(filters.teams_exclude)))
+    return stmt
+
+
+def _work_queue_stmt(
+    time_window: TimeWindow,
+    config: TranscriptSummaryConfig,
+    *,
+    reanalyze: bool,
+    cursor: str,
+):
     stmt = select(CxoneTranscriptRow)
     if time_window.start is not None:
         stmt = stmt.where(CxoneTranscriptRow.interaction_start >= time_window.start)
     if time_window.end is not None:
         stmt = stmt.where(CxoneTranscriptRow.interaction_start <= time_window.end)
-    return list(session.scalars(stmt).all())
+    stmt = _apply_segment_filters_sql(stmt, config.call_selection)
+    stmt = stmt.where(func.length(func.trim(CxoneTranscriptRow.transcript_text)) > 0)
+
+    skip_existing = config.classification.skip_existing and not reanalyze
+    if skip_existing:
+        stmt = stmt.outerjoin(
+            CxoneTranscriptAnalysisRow,
+            CxoneTranscriptAnalysisRow.segment_id == CxoneTranscriptRow.segment_id,
+        ).where(CxoneTranscriptAnalysisRow.segment_id.is_(None))
+
+    if cursor:
+        stmt = stmt.where(CxoneTranscriptRow.segment_id > cursor)
+    return stmt.order_by(CxoneTranscriptRow.segment_id.asc())
 
 
-def _iter_transcript_batches(
+def _count_work_queue(
     session: Session,
     time_window: TimeWindow,
+    config: TranscriptSummaryConfig,
+    *,
+    reanalyze: bool,
+) -> int:
+    stmt = select(func.count()).select_from(CxoneTranscriptRow)
+    if time_window.start is not None:
+        stmt = stmt.where(CxoneTranscriptRow.interaction_start >= time_window.start)
+    if time_window.end is not None:
+        stmt = stmt.where(CxoneTranscriptRow.interaction_start <= time_window.end)
+    stmt = _apply_segment_filters_sql(stmt, config.call_selection)
+    stmt = stmt.where(func.length(func.trim(CxoneTranscriptRow.transcript_text)) > 0)
+
+    skip_existing = config.classification.skip_existing and not reanalyze
+    if skip_existing:
+        stmt = stmt.outerjoin(
+            CxoneTranscriptAnalysisRow,
+            CxoneTranscriptAnalysisRow.segment_id == CxoneTranscriptRow.segment_id,
+        ).where(CxoneTranscriptAnalysisRow.segment_id.is_(None))
+
+    return int(session.scalar(stmt) or 0)
+
+
+def _analysis_row_count(session: Session) -> int:
+    return int(session.scalar(select(func.count()).select_from(CxoneTranscriptAnalysisRow)) or 0)
+
+
+def _iter_work_batches(
+    session: Session,
+    time_window: TimeWindow,
+    config: TranscriptSummaryConfig,
     batch_size: int,
+    *,
+    reanalyze: bool,
 ) -> Iterator[list[CxoneTranscriptRow]]:
-    """Yield transcript rows in fixed-size chunks (keyset pagination on segment_id)."""
+    """Yield transcript rows still needing classification (skips cached rows in SQL)."""
     cursor = ""
     while True:
-        stmt = select(CxoneTranscriptRow).where(CxoneTranscriptRow.segment_id > cursor)
-        if time_window.start is not None:
-            stmt = stmt.where(CxoneTranscriptRow.interaction_start >= time_window.start)
-        if time_window.end is not None:
-            stmt = stmt.where(CxoneTranscriptRow.interaction_start <= time_window.end)
-        stmt = stmt.order_by(CxoneTranscriptRow.segment_id.asc()).limit(batch_size)
+        stmt = _work_queue_stmt(
+            time_window,
+            config,
+            reanalyze=reanalyze,
+            cursor=cursor,
+        ).limit(batch_size)
         batch = list(session.scalars(stmt).all())
         if not batch:
             break
@@ -255,21 +511,47 @@ def _build_report_batched(
     use_reduction_llm: bool | None,
     reanalyze: bool,
     batch_size: int,
+    commit_every: int,
+    classify_only: bool,
+    progress: TranscriptSummaryProgress,
 ) -> TranscriptSummaryReport:
     stats = _TranscriptRunStats()
-    segments: list[_ClassifiedSegment] = []
     sample_remaining = config.classification.sample_limit
     batch_index = 0
     stop = False
 
-    for batch_rows in _iter_transcript_batches(session, time_window, batch_size):
+    pending = _count_work_queue(session, time_window, config, reanalyze=reanalyze)
+    table_before = _analysis_row_count(session)
+    progress.info(
+        f"Window {time_window.label}: {pending} transcript(s) need classification "
+        f"(cxone_transcript_analysis currently has {table_before} rows)."
+    )
+    if pending == 0:
+        progress.info("Nothing to classify in this window — already complete or filtered out.")
+        return _minimal_report(
+            session,
+            stats=stats,
+            time_window=time_window,
+            config=config,
+            settings=settings,
+            batch_size=batch_size,
+            chunk_days=None,
+            commit_every=commit_every,
+            use_reduction_llm=use_reduction_llm,
+        )
+
+    for batch_rows in _iter_work_batches(
+        session,
+        time_window,
+        config,
+        batch_size,
+        reanalyze=reanalyze,
+    ):
         if stop:
             break
         batch_index += 1
         stats.transcripts_in_window += len(batch_rows)
-        stats.transcripts_with_text += sum(
-            1 for row in batch_rows if (row.transcript_text or "").strip()
-        )
+        stats.transcripts_with_text += len(batch_rows)
 
         filtered, sample_remaining = _filter_transcript_rows(
             batch_rows,
@@ -277,26 +559,24 @@ def _build_report_batched(
             sample_remaining=sample_remaining,
         )
 
-        batch_segments, classified_new, errors, persisted = _classify_and_persist_batch(
+        classified_new, errors, persisted = _classify_and_commit_incremental(
             session,
             filtered,
             config=config,
             settings=settings,
             api_key=api_key,
-            reanalyze=reanalyze,
+            commit_every=commit_every,
+            progress=progress,
         )
-        segments.extend(batch_segments)
         stats.classified_new += classified_new
         stats.classify_errors += errors
         stats.persisted += persisted
 
-        logger.info(
-            "Transcript summary batch %s: fetched=%s filtered=%s classified_new=%s total_segments=%s",
-            batch_index,
-            len(batch_rows),
-            len(filtered),
-            classified_new,
-            len(segments),
+        table_now = _analysis_row_count(session)
+        progress.info(
+            f"Batch {batch_index}: queued={len(batch_rows)} classify_attempted={len(filtered)} "
+            f"new={classified_new} errors={errors} committed={persisted} "
+            f"table_total={table_now}"
         )
 
         if sample_remaining is not None and sample_remaining <= 0:
@@ -305,6 +585,20 @@ def _build_report_batched(
     if stats.persisted:
         ensure_analytics_views(get_engine(settings.database_url))
 
+    if classify_only:
+        return _minimal_report(
+            session,
+            stats=stats,
+            time_window=time_window,
+            config=config,
+            settings=settings,
+            batch_size=batch_size,
+            chunk_days=None,
+            commit_every=commit_every,
+            use_reduction_llm=use_reduction_llm,
+        )
+
+    segments = _load_classified_segments_from_db(session, time_window, config)
     return _assemble_report(
         session,
         segments=segments,
@@ -315,6 +609,142 @@ def _build_report_batched(
         api_key=api_key,
         use_reduction_llm=use_reduction_llm,
         batch_size=batch_size,
+        commit_every=commit_every,
+    )
+
+
+def _classify_and_commit_incremental(
+    session: Session,
+    rows: list[CxoneTranscriptRow],
+    *,
+    config: TranscriptSummaryConfig,
+    settings: Settings,
+    api_key: str,
+    commit_every: int,
+    progress: TranscriptSummaryProgress,
+) -> tuple[int, int, int]:
+    """Classify rows one-by-one; commit every ``commit_every`` successes."""
+    if not rows:
+        return 0, 0, 0
+
+    classified_new = 0
+    classify_errors = 0
+    persisted = 0
+    pending: dict[str, TranscriptReasonAnalysis] = {}
+
+    for index, row in enumerate(rows, start=1):
+        try:
+            analysis = classify_transcript(
+                transcript_text=row.transcript_text or "",
+                segment_summary=row.segment_summary,
+                client_sentiment=row.client_sentiment,
+                skill_name=row.skill_name,
+                agent_name=row.agent_name,
+                api_key=api_key,
+                model=settings.openai_model,
+                base_url=settings.openai_base_url,
+                timeout_seconds=settings.request_timeout_seconds,
+                max_transcript_chars=config.classification.max_transcript_chars,
+            )
+        except Exception as exc:
+            classify_errors += 1
+            progress.error(f"{row.segment_id}: {exc}")
+            continue
+
+        classified_new += 1
+        pending[row.segment_id] = analysis
+
+        if len(pending) >= commit_every and config.classification.store_results:
+            _persist_analyses(session, pending, model=settings.openai_model)
+            session.commit()
+            persisted += len(pending)
+            progress.info(f"Committed {len(pending)} row(s) to cxone_transcript_analysis")
+            pending.clear()
+
+        if index % max(1, commit_every) == 0:
+            progress.info(
+                f"  progress: {index}/{len(rows)} in current fetch batch "
+                f"({classified_new} ok, {classify_errors} errors)"
+            )
+
+    if pending and config.classification.store_results:
+        _persist_analyses(session, pending, model=settings.openai_model)
+        session.commit()
+        persisted += len(pending)
+        progress.info(f"Committed final {len(pending)} row(s) to cxone_transcript_analysis")
+
+    return classified_new, classify_errors, persisted
+
+
+def _minimal_report(
+    session: Session,
+    *,
+    stats: _TranscriptRunStats,
+    time_window: TimeWindow,
+    config: TranscriptSummaryConfig,
+    settings: Settings,
+    batch_size: int | None,
+    chunk_days: int | None,
+    commit_every: int | None,
+    use_reduction_llm: bool | None,
+) -> TranscriptSummaryReport:
+    table_total = _analysis_row_count(session)
+    totals = {
+        "transcripts_in_window": stats.transcripts_in_window,
+        "transcripts_with_text": stats.transcripts_with_text,
+        "transcripts_analyzed": table_total,
+        "transcripts_classified_this_run": stats.classified_new,
+        "transcripts_persisted_this_run": stats.persisted,
+        "transcripts_reused_from_cache": 0,
+        "classification_error_count": stats.classify_errors,
+        "summaries_in_database": table_total,
+    }
+    classification_meta: dict[str, Any] = {
+        "max_transcript_chars": config.classification.max_transcript_chars,
+        "concurrency": config.classification.concurrency,
+        "store_results": config.classification.store_results,
+        "skip_existing": config.classification.skip_existing,
+        "sample_limit": config.classification.sample_limit,
+        "classify_only": True,
+    }
+    if batch_size is not None:
+        classification_meta["batch_size"] = batch_size
+    if chunk_days is not None:
+        classification_meta["chunk_days"] = chunk_days
+    if commit_every is not None:
+        classification_meta["commit_every"] = commit_every
+
+    reduction_requested = (
+        use_reduction_llm
+        if use_reduction_llm is not None
+        else config.reduction_recommendations.enabled
+    )
+
+    return TranscriptSummaryReport(
+        generated_at=datetime.now(timezone.utc).isoformat(),
+        timeframe={
+            "preset": time_window.preset,
+            "start": time_window.start.isoformat() if time_window.start else None,
+            "end": time_window.end.isoformat() if time_window.end else None,
+            "label": time_window.label,
+        },
+        filters=config.call_selection.to_dict(),
+        totals=totals,
+        classification=classification_meta,
+        top_primary_reasons=[],
+        insights=[
+            f"Classified {stats.classified_new} transcript(s) this run; "
+            f"persisted {stats.persisted}; errors {stats.classify_errors}.",
+            f"cxone_transcript_analysis now has {table_total} row(s) total.",
+        ],
+        llm={
+            "classification_model": settings.openai_model,
+            "segments_classified_this_run": stats.classified_new,
+            "classification_errors": stats.classify_errors,
+            "reduction_llm_requested": reduction_requested,
+            "reduction_llm_applied": False,
+            "reduction_reasons_processed": 0,
+        },
     )
 
 
@@ -326,41 +756,27 @@ def _classify_and_persist_batch(
     settings: Settings,
     api_key: str,
     reanalyze: bool,
+    progress: TranscriptSummaryProgress | None = None,
 ) -> tuple[list[_ClassifiedSegment], int, int, int]:
     if not filtered:
         return [], 0, 0, 0
 
-    existing = _load_cached_analyses(session, {row.segment_id for row in filtered})
-    skip_existing = config.classification.skip_existing and not reanalyze
-
-    to_classify: list[CxoneTranscriptRow] = []
-    for row in filtered:
-        if skip_existing and row.segment_id in existing:
-            continue
-        to_classify.append(row)
-
-    classified_new, classify_errors = _classify_segments(
-        to_classify,
+    progress = progress or TranscriptSummaryProgress.stderr()
+    classified_new, classify_errors, persisted = _classify_and_commit_incremental(
+        session,
+        filtered,
+        config=config,
         settings=settings,
         api_key=api_key,
-        config=config,
+        commit_every=1,
+        progress=progress,
     )
 
-    persisted_count = 0
-    if config.classification.store_results and classified_new:
-        persisted_count = _persist_analyses(
-            session,
-            classified_new,
-            model=settings.openai_model,
-        )
-        session.commit()
-
-    analyses: dict[str, TranscriptReasonAnalysis] = dict(existing)
-    analyses.update(classified_new)
-
+    segment_ids = {row.segment_id for row in filtered}
+    existing = _load_cached_analyses(session, segment_ids)
     segments: list[_ClassifiedSegment] = []
     for row in filtered:
-        analysis = analyses.get(row.segment_id)
+        analysis = existing.get(row.segment_id)
         if analysis is None:
             continue
         segments.append(
@@ -372,7 +788,7 @@ def _classify_and_persist_batch(
             )
         )
 
-    return segments, len(classified_new), classify_errors, persisted_count
+    return segments, classified_new, classify_errors, persisted
 
 
 def _fetch_transcript_texts(session: Session, segment_ids: set[str]) -> dict[str, str]:
@@ -402,7 +818,9 @@ def _build_report(
     use_reduction_llm: bool | None,
     reanalyze: bool,
     batch_size: int | None = None,
+    progress: TranscriptSummaryProgress | None = None,
 ) -> TranscriptSummaryReport:
+    progress = progress or TranscriptSummaryProgress.stderr()
     filtered, _ = _filter_transcript_rows(
         rows,
         config,
@@ -419,6 +837,7 @@ def _build_report(
         settings=settings,
         api_key=api_key,
         reanalyze=reanalyze,
+        progress=progress,
     )
     stats.classified_new = classified_new
     stats.classify_errors = errors
@@ -451,6 +870,8 @@ def _assemble_report(
     api_key: str,
     use_reduction_llm: bool | None,
     batch_size: int | None,
+    chunk_days: int | None = None,
+    commit_every: int | None = None,
 ) -> TranscriptSummaryReport:
     generated_at = datetime.now(timezone.utc).isoformat()
     total = len(segments)
@@ -525,6 +946,10 @@ def _assemble_report(
     }
     if batch_size is not None:
         classification_meta["batch_size"] = batch_size
+    if chunk_days is not None:
+        classification_meta["chunk_days"] = chunk_days
+    if commit_every is not None:
+        classification_meta["commit_every"] = commit_every
 
     return TranscriptSummaryReport(
         generated_at=generated_at,

@@ -736,11 +736,21 @@ python scripts/run_transcript_summary.py --timeframe last-week `
 # Rule-based reduction tips only (no second LLM pass)
 python scripts/run_transcript_summary.py --timeframe last-week --no-reduction-llm
 
-# Large backfill without loading all transcripts into memory
-python scripts/run_transcript_summary.py --timeframe all --batch-size 500 --no-reduction-llm
+# Custom date range (filters on interaction_start)
+python scripts/run_transcript_summary.py `
+  --start 2026-03-05T00:00:00Z `
+  --end 2026-03-11T23:59:59Z `
+  --no-reduction-llm
+
+# Full backfill (auto-enables --chunk-days 7 --batch-size 50 --commit-every 10)
+python scripts/run_transcript_summary.py --timeframe all --no-reduction-llm
+
+# Explicit control — progress prints to stderr; commits every 10 classifications
+python scripts/run_transcript_summary.py --timeframe all `
+  --chunk-days 7 --batch-size 50 --commit-every 10 --no-reduction-llm
 ```
 
-**Memory note:** Without `--batch-size`, the full time window is loaded into RAM first. For `--timeframe all` or large ranges, use **`--batch-size 200`** (or smaller if needed). Results are committed per batch; `skip_existing` skips cached rows on re-run.
+**Large-window note:** `--timeframe all` auto-enables chunked mode. Progress appears on **stderr** (`[HH:MM:SS] ...`). Postgres is updated every **`--commit-every`** successful classifications (default **10**), not after an entire 500-row batch. Already-classified rows are **skipped in SQL** (`skip_existing`). Validate your OpenAI key at startup — invalid keys fail immediately instead of after hours of 401s.
 
 **Cost note:** Step 4b runs one LLM call per transcript (plus optional reduction calls for top primary reasons). Use `--limit` while tuning prompts, then run the full window.
 
@@ -749,7 +759,11 @@ python scripts/run_transcript_summary.py --timeframe all --batch-size 500 --no-r
 After transcript summarization, build the semantic search index so the chatbot can answer contextual questions (not just SQL aggregates). See **[docs/RAG.md](docs/RAG.md)**.
 
 ```powershell
+# Relative window
 python scripts/build_knowledge_index.py --timeframe last-week
+
+# Custom date range (filters on interaction_start)
+python scripts/build_knowledge_index.py --start 2026-03-05 --end 2026-03-11
 ```
 
 On Railway, point `DATABASE_URL` at `TARGET_DATABASE_URL` and run the same command after syncing tables.
