@@ -17,7 +17,12 @@ if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
 from orchestration.config import get_settings  # noqa: E402
-from orchestration.steps.daily_pipeline import run_daily_pipeline  # noqa: E402
+from orchestration.steps.daily_pipeline import (  # noqa: E402
+    railway_sync_cli_args,
+    railway_sync_filter,
+    railway_sync_tables,
+    run_daily_pipeline,
+)
 
 
 @click.command()
@@ -47,7 +52,7 @@ from orchestration.steps.daily_pipeline import run_daily_pipeline  # noqa: E402
 @click.option(
     "--sync-railway",
     is_flag=True,
-    help="After pipeline, run scripts/sync_to_railway.py (needs TARGET_DATABASE_URL).",
+    help="After pipeline, incrementally sync updated rows to Railway (needs TARGET_DATABASE_URL).",
 )
 def main(
     target_date_str: str | None,
@@ -103,16 +108,24 @@ def main(
         click.echo(f"Skipped: {', '.join(result.skipped_steps)}")
 
     if sync_railway and not dry_run:
-        click.echo("Syncing to Railway...")
-        sync_script = ROOT / "scripts" / "sync_to_railway.py"
-        proc = subprocess.run(
-            [sys.executable, str(sync_script)],
-            cwd=str(ROOT),
-            check=False,
-        )
-        if proc.returncode != 0:
-            raise click.ClickException("Railway sync failed (see output above).")
-        click.echo("Railway sync completed.")
+        sync_tables = railway_sync_tables(result.skipped_steps)
+        sync_filter = railway_sync_filter(result.window, result.skipped_steps)
+        if not sync_tables or sync_filter is None:
+            click.echo("Skipping Railway sync (all pipeline steps were skipped).")
+        else:
+            click.echo(
+                "Syncing to Railway "
+                f"({', '.join(sync_tables)}, target day {result.window.cxone_start.date().isoformat()})..."
+            )
+            sync_script = ROOT / "scripts" / "sync_to_railway.py"
+            proc = subprocess.run(
+                [sys.executable, str(sync_script), *railway_sync_cli_args(sync_filter, sync_tables)],
+                cwd=str(ROOT),
+                check=False,
+            )
+            if proc.returncode != 0:
+                raise click.ClickException("Railway sync failed (see output above).")
+            click.echo("Railway sync completed.")
 
 
 if __name__ == "__main__":

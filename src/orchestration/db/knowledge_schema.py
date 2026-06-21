@@ -43,6 +43,11 @@ ON analytics_knowledge_chunks USING ivfflat (embedding vector_cosine_ops)
 WITH (lists = 100)
 """
 
+# Building an ivfflat index needs more memory than the default maintenance_work_mem
+# (often 64 MB) allows. Raise it for the index-build transaction only (session-scoped
+# SET LOCAL — never changes the server-wide setting).
+VECTOR_INDEX_MAINTENANCE_WORK_MEM = "256MB"
+
 
 class KnowledgeSchemaError(RuntimeError):
     pass
@@ -93,10 +98,40 @@ def ensure_knowledge_schema(
         connection.execute(text(KNOWLEDGE_INDEX_SQL))
 
     if create_vector_index and _knowledge_row_count(engine) >= 100:
-        with engine.begin() as connection:
-            connection.execute(text(KNOWLEDGE_VECTOR_INDEX_SQL))
+        _create_vector_index(engine)
 
     return True
+
+
+def _create_vector_index(engine: Engine) -> None:
+    """Create the ivfflat embedding index, raising maintenance_work_mem for the build.
+
+    SET LOCAL applies only to this transaction, so the server-wide configuration is
+    untouched. If the instance refuses the requested value (or the build still runs
+    out of memory) the original error is re-raised with actionable guidance.
+    """
+    try:
+        with engine.begin() as connection:
+            connection.execute(
+                text(f"SET LOCAL maintenance_work_mem = '{VECTOR_INDEX_MAINTENANCE_WORK_MEM}'")
+            )
+            connection.execute(text(KNOWLEDGE_VECTOR_INDEX_SQL))
+    except DBAPIError as exc:
+        if "maintenance_work_mem" in str(exc).lower():
+            raise KnowledgeSchemaError(
+                "Building the pgvector ivfflat index ran out of memory even after "
+                f"raising maintenance_work_mem to {VECTOR_INDEX_MAINTENANCE_WORK_MEM} "
+                "for the build.\n\n"
+                "Options:\n"
+                "  - Increase maintenance_work_mem on the Postgres instance "
+                "(e.g. ALTER SYSTEM SET maintenance_work_mem = '256MB'; then reload), or\n"
+                "  - Raise VECTOR_INDEX_MAINTENANCE_WORK_MEM in "
+                "src/orchestration/db/knowledge_schema.py, or\n"
+                "  - Lower the ivfflat 'lists' value in KNOWLEDGE_VECTOR_INDEX_SQL.\n\n"
+                "Note: embeddings are already stored; the index is an optional "
+                "performance optimization for similarity search."
+            ) from exc
+        raise
 
 
 def _knowledge_row_count(engine: Engine) -> int:

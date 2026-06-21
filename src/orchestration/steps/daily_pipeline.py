@@ -125,3 +125,70 @@ def run_daily_pipeline(
         combined=combined_result,
         skipped_steps=skipped,
     )
+
+
+def railway_sync_tables(skipped_steps: list[str]) -> list[str]:
+    """Tables to push after a daily run, based on which steps executed."""
+    tables: list[str] = []
+    if "cxone" not in skipped_steps:
+        tables.append("cxone_transcripts")
+    if "zendesk" not in skipped_steps:
+        tables.append("zendesk_tickets")
+    if "combined" not in skipped_steps:
+        tables.append("combined_interactions")
+    return tables
+
+
+@dataclass(frozen=True)
+class RailwaySyncFilter:
+    """Business-date filters for incremental Railway sync after a daily run."""
+
+    interaction_start: datetime | None
+    interaction_end: datetime | None
+    ticket_created_start: datetime | None
+    ticket_created_end: datetime | None
+    include_linked_tickets: bool
+
+
+def railway_sync_filter(window: DailyWindow, skipped_steps: list[str]) -> RailwaySyncFilter | None:
+    """Scope sync to the target calendar day (not Zendesk lookback overlap)."""
+    if not railway_sync_tables(skipped_steps):
+        return None
+
+    interaction_start: datetime | None = None
+    interaction_end: datetime | None = None
+    if "cxone" not in skipped_steps or "combined" not in skipped_steps:
+        interaction_start = window.cxone_start
+        interaction_end = window.cxone_end
+
+    ticket_created_start: datetime | None = None
+    ticket_created_end: datetime | None = None
+    if "zendesk" not in skipped_steps:
+        ticket_created_start = window.cxone_start
+        ticket_created_end = window.cxone_end
+
+    include_linked_tickets = (
+        "zendesk" not in skipped_steps and "combined" not in skipped_steps
+    )
+
+    return RailwaySyncFilter(
+        interaction_start=interaction_start,
+        interaction_end=interaction_end,
+        ticket_created_start=ticket_created_start,
+        ticket_created_end=ticket_created_end,
+        include_linked_tickets=include_linked_tickets,
+    )
+
+
+def railway_sync_cli_args(sync_filter: RailwaySyncFilter, tables: list[str]) -> list[str]:
+    """Build argv for scripts/sync_to_railway.py from a daily-run filter."""
+    args = ["--tables", ",".join(tables)]
+    if sync_filter.interaction_start is not None and sync_filter.interaction_end is not None:
+        args.extend(["--interaction-start", sync_filter.interaction_start.isoformat()])
+        args.extend(["--interaction-end", sync_filter.interaction_end.isoformat()])
+    if sync_filter.ticket_created_start is not None and sync_filter.ticket_created_end is not None:
+        args.extend(["--ticket-created-start", sync_filter.ticket_created_start.isoformat()])
+        args.extend(["--ticket-created-end", sync_filter.ticket_created_end.isoformat()])
+    if sync_filter.include_linked_tickets:
+        args.append("--include-linked-tickets")
+    return args

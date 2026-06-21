@@ -1,6 +1,6 @@
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 
-from sqlalchemy import BigInteger, Boolean, DateTime, String, Text, func
+from sqlalchemy import BigInteger, Boolean, Date, DateTime, String, Text, func
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
@@ -20,6 +20,7 @@ class CxoneTranscriptRow(Base):
     contact_no: Mapped[str | None] = mapped_column(String(64), nullable=True)
     interaction_start: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     interaction_end: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    interaction_date: Mapped[date | None] = mapped_column(Date, nullable=True, index=True)
     agent_name: Mapped[str | None] = mapped_column(String(512), nullable=True)
     team_name: Mapped[str | None] = mapped_column(String(512), nullable=True)
     skill_name: Mapped[str | None] = mapped_column(String(512), nullable=True)
@@ -229,12 +230,14 @@ def init_database(database_url: str) -> None:
     from orchestration.db.analytics_views import ensure_analytics_views
     from orchestration.db.knowledge_schema import ensure_knowledge_schema
     from orchestration.db.session import get_engine
+    from orchestration.db.transcript_columns import ensure_cxone_transcript_columns
     from orchestration.linking.combined_columns import ensure_combined_interaction_columns
 
     engine = get_engine(database_url)
     Base.metadata.create_all(engine)
     ensure_promoted_columns(engine)
     ensure_combined_interaction_columns(engine)
+    ensure_cxone_transcript_columns(engine)
     CxoneTranscriptAnalysisRow.__table__.create(engine, checkfirst=True)
     ensure_analytics_views(engine)
     ensure_knowledge_schema(engine, required=False)

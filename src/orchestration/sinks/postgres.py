@@ -1,11 +1,22 @@
 from __future__ import annotations
 
+from datetime import date, datetime, timezone
+
 from sqlalchemy.dialects.postgresql import insert
 
 from orchestration.config import Settings
 from orchestration.db.schema import CxoneTranscriptRow, init_database, utc_now
 from orchestration.db.session import get_session_factory
 from orchestration.models import TranscriptRecord
+
+
+def _utc_date(value: datetime | None) -> date | None:
+    """UTC calendar date of a timestamp (matches the SQL interaction_date backfill)."""
+    if value is None:
+        return None
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc).date()
 
 
 class PostgresTranscriptSink:
@@ -54,6 +65,7 @@ def _record_to_row(record: TranscriptRecord, extracted_at) -> dict:
         "contact_no": record.contact_no,
         "interaction_start": record.interaction_start,
         "interaction_end": record.interaction_end,
+        "interaction_date": _utc_date(record.interaction_start),
         "agent_name": record.agent_name,
         "team_name": record.team_name,
         "skill_name": record.skill_name,

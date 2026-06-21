@@ -4,6 +4,8 @@
 from __future__ import annotations
 
 import sys
+from datetime import datetime
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -19,6 +21,7 @@ if str(SRC) not in sys.path:
 
 load_dotenv(ROOT / ".env")
 
+from orchestration.analysis.timeframes import parse_window_bound  # noqa: E402
 from orchestration.db.analytics_views import ensure_analytics_views  # noqa: E402
 from orchestration.db.schema import (  # noqa: E402
     CombinedInteractionRow,
@@ -66,6 +69,29 @@ TABLE_SYNC_DEFAULTS: dict[str, dict[str, Any]] = {
     },
 }
 
+# Column set on each upsert in the local pipeline; used by --since filtering.
+TABLE_SYNC_TIMESTAMP_COLUMN: dict[str, str] = {
+    "cxone_transcripts": "updated_at",
+    "cxone_transcript_analysis": "updated_at",
+    "zendesk_tickets": "row_updated_at",
+    "combined_interactions": "updated_at",
+}
+
+TABLE_INTERACTION_START_COLUMN: dict[str, str] = {
+    "cxone_transcripts": "interaction_start",
+    "combined_interactions": "interaction_start",
+}
+
+
+@dataclass(frozen=True)
+class SyncRowFilter:
+    since: datetime | None = None
+    interaction_start: datetime | None = None
+    interaction_end: datetime | None = None
+    ticket_created_start: datetime | None = None
+    ticket_created_end: datetime | None = None
+    linked_ticket_ids: tuple[int, ...] = ()
+
 
 @click.command()
 @click.option(
@@ -98,6 +124,36 @@ TABLE_SYNC_DEFAULTS: dict[str, dict[str, Any]] = {
     help="Include raw_metadata JSON on cxone_transcripts (large; omit by default).",
 )
 @click.option("--init-schema/--no-init-schema", default=True, help="CREATE TABLE on target if missing.")
+@click.option(
+    "--since",
+    default=None,
+    help="Only sync rows updated on or after this time (ISO-8601 or YYYY-MM-DD UTC).",
+)
+@click.option(
+    "--interaction-start",
+    default=None,
+    help="For cxone/combined: only sync calls with interaction_start on or after this time.",
+)
+@click.option(
+    "--interaction-end",
+    default=None,
+    help="For cxone/combined: only sync calls with interaction_start on or before this time.",
+)
+@click.option(
+    "--ticket-created-start",
+    default=None,
+    help="For zendesk_tickets: only sync tickets created on or after this time.",
+)
+@click.option(
+    "--ticket-created-end",
+    default=None,
+    help="For zendesk_tickets: only sync tickets created on or before this time.",
+)
+@click.option(
+    "--include-linked-tickets/--no-include-linked-tickets",
+    default=False,
+    help="For zendesk_tickets: also sync tickets linked from combined_interactions in the interaction window.",
+)
 def main(
     source_url: str | None,
     target_url: str,
@@ -105,6 +161,12 @@ def main(
     batch_size: int | None,
     include_raw_metadata: bool,
     init_schema: bool,
+    since: str | None,
+    interaction_start: str | None,
+    interaction_end: str | None,
+    ticket_created_start: str | None,
+    ticket_created_end: str | None,
+    include_linked_tickets: bool,
 ) -> None:
     """Upsert pipeline tables to Railway for the hosted chatbot."""
     if not source_url:
@@ -129,6 +191,32 @@ def main(
     if unknown:
         raise click.ClickException(f"Unknown tables: {unknown}. Choose from {list(TABLE_MODELS)}")
 
+    since_dt = parse_window_bound(since, is_end=False) if since else None
+    interaction_start_dt = (
+        parse_window_bound(interaction_start, is_end=False) if interaction_start else None
+    )
+    interaction_end_dt = parse_window_bound(interaction_end, is_end=True) if interaction_end else None
+    ticket_created_start_dt = (
+        parse_window_bound(ticket_created_start, is_end=False) if ticket_created_start else None
+    )
+    ticket_created_end_dt = (
+        parse_window_bound(ticket_created_end, is_end=True) if ticket_created_end else None
+    )
+    if (interaction_start and not interaction_end) or (interaction_end and not interaction_start):
+        raise click.ClickException("Provide both --interaction-start and --interaction-end.")
+    if (ticket_created_start and not ticket_created_end) or (
+        ticket_created_end and not ticket_created_start
+    ):
+        raise click.ClickException("Provide both --ticket-created-start and --ticket-created-end.")
+
+    row_filter = SyncRowFilter(
+        since=since_dt,
+        interaction_start=interaction_start_dt,
+        interaction_end=interaction_end_dt,
+        ticket_created_start=ticket_created_start_dt,
+        ticket_created_end=ticket_created_end_dt,
+    )
+
     if init_schema:
         click.echo("Ensuring target schema (tables + column migrations)...")
         init_database(target_url)
@@ -139,6 +227,31 @@ def main(
 
     source_factory = get_session_factory(source_url)
     target_factory = get_session_factory(target_url)
+
+    linked_ticket_ids: tuple[int, ...] = ()
+    if include_linked_tickets:
+        if interaction_start_dt is None or interaction_end_dt is None:
+            raise click.ClickException(
+                "--include-linked-tickets requires --interaction-start and --interaction-end."
+            )
+        if "zendesk_tickets" not in table_names:
+            raise click.ClickException(
+                "--include-linked-tickets requires zendesk_tickets in --tables."
+            )
+        with source_factory() as src_session:
+            linked_ticket_ids = _fetch_linked_ticket_ids(
+                src_session,
+                interaction_start=interaction_start_dt,
+                interaction_end=interaction_end_dt,
+            )
+        row_filter = SyncRowFilter(
+            since=row_filter.since,
+            interaction_start=row_filter.interaction_start,
+            interaction_end=row_filter.interaction_end,
+            ticket_created_start=row_filter.ticket_created_start,
+            ticket_created_end=row_filter.ticket_created_end,
+            linked_ticket_ids=linked_ticket_ids,
+        )
 
     for table_name in table_names:
         model = TABLE_MODELS[table_name]
@@ -157,6 +270,11 @@ def main(
             omit_note.append(f"omit {','.join(sorted(omit_columns))}")
         if sql_overrides:
             omit_note.append("truncate large text at source")
+        if since_dt is not None:
+            omit_note.append(
+                f"since {since_dt.isoformat()} on {TABLE_SYNC_TIMESTAMP_COLUMN[table_name]}"
+            )
+        omit_note.extend(_format_row_filter_notes(table_name, row_filter))
         extras = f", {', '.join(omit_note)}" if omit_note else ""
 
         click.echo(f"Syncing {table_name} (batch_size={effective_batch}{extras})...")
@@ -170,12 +288,118 @@ def main(
                     batch_size=effective_batch,
                     omit_columns=omit_columns,
                     sql_overrides=sql_overrides,
+                    row_filter=row_filter,
                 )
         except Exception as exc:
             raise click.ClickException(_format_sync_error(table_name, exc, effective_batch)) from exc
         click.echo(f"  {table_name}: {copied} rows upserted")
 
     click.echo("Done.")
+
+
+def _updated_column_for_table(table_name: str) -> str:
+    try:
+        return TABLE_SYNC_TIMESTAMP_COLUMN[table_name]
+    except KeyError as exc:
+        raise ValueError(f"No --since timestamp column configured for {table_name!r}") from exc
+
+
+def _format_row_filter_notes(table_name: str, row_filter: SyncRowFilter) -> list[str]:
+    notes: list[str] = []
+    if table_name in TABLE_INTERACTION_START_COLUMN:
+        if row_filter.interaction_start is not None and row_filter.interaction_end is not None:
+            notes.append(
+                "interaction_start "
+                f"{row_filter.interaction_start.isoformat()}..{row_filter.interaction_end.isoformat()}"
+            )
+    if table_name == "zendesk_tickets":
+        if row_filter.ticket_created_start is not None and row_filter.ticket_created_end is not None:
+            notes.append(
+                "created_at "
+                f"{row_filter.ticket_created_start.isoformat()}..{row_filter.ticket_created_end.isoformat()}"
+            )
+        if row_filter.linked_ticket_ids:
+            notes.append(f"+{len(row_filter.linked_ticket_ids)} linked ticket(s)")
+    return notes
+
+
+def _fetch_linked_ticket_ids(
+    session: Session,
+    *,
+    interaction_start: datetime,
+    interaction_end: datetime,
+) -> tuple[int, ...]:
+    result = session.execute(
+        text(
+            """
+            SELECT DISTINCT ticket_id
+            FROM combined_interactions
+            WHERE interaction_start >= :interaction_start
+              AND interaction_start <= :interaction_end
+              AND ticket_id IS NOT NULL
+            UNION
+            SELECT DISTINCT phone_call_ticket_id
+            FROM combined_interactions
+            WHERE interaction_start >= :interaction_start
+              AND interaction_start <= :interaction_end
+              AND phone_call_ticket_id IS NOT NULL
+            """
+        ),
+        {
+            "interaction_start": interaction_start,
+            "interaction_end": interaction_end,
+        },
+    )
+    return tuple(int(row[0]) for row in result)
+
+
+def _build_keyset_where(
+    *,
+    table_name: str,
+    pk_name: str,
+    updated_column: str | None,
+    row_filter: SyncRowFilter | None,
+    last_pk: Any,
+) -> tuple[str, dict[str, Any]]:
+    row_filter = row_filter or SyncRowFilter()
+    where_parts: list[str] = []
+    params: dict[str, Any] = {}
+
+    if row_filter.since is not None and updated_column is not None:
+        where_parts.append(f"{updated_column} >= :since")
+        params["since"] = row_filter.since
+
+    interaction_column = TABLE_INTERACTION_START_COLUMN.get(table_name)
+    if (
+        interaction_column is not None
+        and row_filter.interaction_start is not None
+        and row_filter.interaction_end is not None
+    ):
+        where_parts.append(f"{interaction_column} >= :interaction_start")
+        where_parts.append(f"{interaction_column} <= :interaction_end")
+        params["interaction_start"] = row_filter.interaction_start
+        params["interaction_end"] = row_filter.interaction_end
+
+    if table_name == "zendesk_tickets":
+        ticket_predicates: list[str] = []
+        if row_filter.ticket_created_start is not None and row_filter.ticket_created_end is not None:
+            ticket_predicates.append(
+                "(created_at >= :ticket_created_start AND created_at <= :ticket_created_end)"
+            )
+            params["ticket_created_start"] = row_filter.ticket_created_start
+            params["ticket_created_end"] = row_filter.ticket_created_end
+        if row_filter.linked_ticket_ids:
+            ticket_predicates.append("ticket_id = ANY(:linked_ticket_ids)")
+            params["linked_ticket_ids"] = list(row_filter.linked_ticket_ids)
+        if ticket_predicates:
+            where_parts.append(f"({' OR '.join(ticket_predicates)})")
+
+    if last_pk is not None:
+        where_parts.append(f"{pk_name} > :last_pk")
+        params["last_pk"] = last_pk
+
+    where_clause = f"WHERE {' AND '.join(where_parts)}" if where_parts else ""
+    return where_clause, params
 
 
 def _sync_table_keyset(
@@ -186,6 +410,7 @@ def _sync_table_keyset(
     batch_size: int,
     omit_columns: frozenset[str],
     sql_overrides: dict[str, str],
+    row_filter: SyncRowFilter | None = None,
 ) -> int:
     """Paginate source rows by primary key to avoid loading the full table at once."""
     if sql_overrides or omit_columns:
@@ -196,15 +421,36 @@ def _sync_table_keyset(
             batch_size=batch_size,
             omit_columns=omit_columns,
             sql_overrides=sql_overrides,
+            row_filter=row_filter,
         )
 
     pk_column = inspect(model).primary_key[0]
     pk_attr = getattr(model, pk_column.name)
+    table_name = model.__tablename__
+    updated_attr = (
+        getattr(model, _updated_column_for_table(table_name))
+        if row_filter and row_filter.since is not None
+        else None
+    )
+    interaction_attr = (
+        getattr(model, TABLE_INTERACTION_START_COLUMN[table_name])
+        if table_name in TABLE_INTERACTION_START_COLUMN
+        and row_filter
+        and row_filter.interaction_start is not None
+        and row_filter.interaction_end is not None
+        else None
+    )
     copied = 0
     last_pk: Any = None
+    row_filter = row_filter or SyncRowFilter()
 
     while True:
         stmt = select(model).order_by(pk_attr).limit(batch_size)
+        if row_filter.since is not None and updated_attr is not None:
+            stmt = stmt.where(updated_attr >= row_filter.since)
+        if interaction_attr is not None:
+            stmt = stmt.where(interaction_attr >= row_filter.interaction_start)
+            stmt = stmt.where(interaction_attr <= row_filter.interaction_end)
         if last_pk is not None:
             stmt = stmt.where(pk_attr > last_pk)
 
@@ -230,11 +476,13 @@ def _sync_table_keyset_sql(
     batch_size: int,
     omit_columns: frozenset[str],
     sql_overrides: dict[str, str],
+    row_filter: SyncRowFilter | None = None,
 ) -> int:
     """Keyset sync with SQL-level truncation — avoids OOM on large text/json columns."""
     pk_column = inspect(model).primary_key[0]
     pk_name = pk_column.name
     table_name = model.__tablename__
+    updated_column = _updated_column_for_table(table_name)
 
     select_parts: list[str] = []
     for col in model.__table__.columns:
@@ -250,10 +498,14 @@ def _sync_table_keyset_sql(
 
     while True:
         params: dict[str, Any] = {"batch_size": batch_size}
-        where_clause = ""
-        if last_pk is not None:
-            where_clause = f"WHERE {pk_name} > :last_pk"
-            params["last_pk"] = last_pk
+        where_clause, where_params = _build_keyset_where(
+            table_name=table_name,
+            pk_name=pk_name,
+            updated_column=updated_column,
+            row_filter=row_filter,
+            last_pk=last_pk,
+        )
+        params.update(where_params)
 
         query = text(
             f"""
