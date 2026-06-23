@@ -18,7 +18,7 @@ from orchestration.analysis.timeframes import parse_window_bound, resolve_time_w
 from orchestration.analysis.transcript_summary_progress import TranscriptSummaryProgress  # noqa: E402
 from orchestration.config import get_settings  # noqa: E402
 from orchestration.db.analytics_views import ensure_analytics_views  # noqa: E402
-from orchestration.db.session import get_engine  # noqa: E402
+from orchestration.db.session import get_engine, normalize_database_url  # noqa: E402
 from orchestration.rag.index import build_knowledge_index  # noqa: E402
 
 
@@ -42,12 +42,21 @@ from orchestration.rag.index import build_knowledge_index  # noqa: E402
 )
 @click.option("--limit", type=int, default=None, help="Max calls to index (testing).")
 @click.option("--batch-size", type=int, default=32, show_default=True, help="Embedding batch size.")
+@click.option(
+    "--database-url",
+    "--target-url",
+    "database_url",
+    envvar="TARGET_DATABASE_URL",
+    default=None,
+    help="Build the index on this DB instead of DATABASE_URL (e.g. Railway public URL).",
+)
 def main(
     timeframe_preset: str,
     start: str | None,
     end: str | None,
     limit: int | None,
     batch_size: int,
+    database_url: str | None,
 ) -> None:
     """Embed call interaction documents for semantic search in the chatbot."""
     load_dotenv(ROOT / ".env")
@@ -58,6 +67,16 @@ def main(
 
     if (start and not end) or (end and not start):
         raise click.ClickException("Provide both --start and --end for a custom range.")
+
+    target_url = normalize_database_url(database_url) if database_url else settings.database_url
+    if "railway.internal" in target_url:
+        raise click.ClickException(
+            "The target database URL uses a Railway private hostname "
+            "(postgres.railway.internal). That URL only works for services running on "
+            "Railway, not from your PC.\n\n"
+            "Fix: Railway dashboard -> Postgres service -> Connect -> copy the **public** "
+            "URL (host like *.proxy.rlwy.net or *.railway.app, not *.railway.internal)."
+        )
 
     start_dt = parse_window_bound(start, is_end=False) if start else None
     end_dt = parse_window_bound(end, is_end=True) if end else None
@@ -72,7 +91,12 @@ def main(
     except ValueError as exc:
         raise click.ClickException(str(exc)) from exc
 
-    engine = get_engine(settings.database_url)
+    from sqlalchemy.engine import make_url
+
+    target_host = make_url(target_url).host or "(local)"
+    click.echo(f"Building knowledge index on database host: {target_host}")
+
+    engine = get_engine(target_url)
     click.echo("Ensuring analytics views...")
     ensure_analytics_views(engine)
 

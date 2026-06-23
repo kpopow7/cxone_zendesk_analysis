@@ -33,7 +33,7 @@ Complete these on your PC first:
 - [ ] `TARGET_DATABASE_URL` in `.env` uses the **public** Postgres URL (not `postgres.railway.internal`)
 - [ ] `python scripts/sync_to_railway.py` completes successfully
 - [ ] Analytics views exist on Railway (`analytics_interactions`, `analytics_transcript_summaries` if using Step 4b)
-- [ ] Knowledge index built for RAG (`python scripts/build_knowledge_index.py` — see [docs/RAG.md](../docs/RAG.md))
+- [ ] Knowledge index built for RAG **on the Railway DB** (`python scripts/build_knowledge_index.py --target-url $env:TARGET_DATABASE_URL` — the `analytics_knowledge_chunks` table is not synced, so build it directly on Railway; see [docs/RAG.md](../docs/RAG.md))
 - [ ] This repo is pushed to GitHub (Railway deploys from GitHub)
 
 ---
@@ -284,9 +284,20 @@ Use the **private** host here, not the public TCP proxy.
 OPENAI_MODEL=gpt-4o-mini
 CHATBOT_SHOW_SQL=true
 CHATBOT_USERS=alice:pass1,bob:pass2
+
+# Conversation memory (follow-up questions build on earlier context; per session)
+CHATBOT_MEMORY_ENABLED=true
+CHATBOT_MEMORY_MAX_TURNS=6
+CHATBOT_MEMORY_SUMMARY_ENABLED=true
 ```
 
 For multiple users, `CHATBOT_USERS` replaces single `CHATBOT_USERNAME` / `CHATBOT_PASSWORD`.
+
+**Conversation memory:** the chatbot remembers the active conversation so users can ask
+follow-ups that build on earlier questions. It resets when the conversation ends (page
+reload / new session). Set `CHATBOT_MEMORY_ENABLED=false` to disable, or
+`CHATBOT_MEMORY_SUMMARY_ENABLED=false` to skip the rolling-summary LLM call on long chats.
+See [docs/RAG.md](../docs/RAG.md#conversation-memory) for details.
 
 **Do not set `PORT` manually** unless Railway support asks you to. The app reads Railway’s injected `PORT` automatically. (Hardcoding `PORT=7860` in service variables can break routing.)
 
@@ -390,6 +401,7 @@ For local dev, use the **public** Postgres URL in `DATABASE_URL` (your PC cannot
 | Login fails | Check `CHATBOT_USERNAME` / `CHATBOT_PASSWORD` on the **chatbot** web service |
 | `relation "analytics_interactions" does not exist` | Run `scripts/railway_analytics_setup.sql` on Railway Postgres |
 | Empty answers | Run `sync_to_railway.py`; confirm rows in `combined_interactions` |
+| RAG answers missing / `analytics_knowledge_chunks` empty on Railway | This table is **not** synced — build it on Railway: `python scripts/build_knowledge_index.py --timeframe all --target-url $env:TARGET_DATABASE_URL`. Confirm the startup line shows a `*.proxy.rlwy.net` host. |
 | `password authentication failed` | Use Railway `DATABASE_URL` exactly; URL-encode special chars in password |
 | Slow first reply | Normal — two OpenAI calls (SQL + summary) per question |
 | `failed to resolve host 'postgres.railway.internal'` | Local sync needs the **public** Postgres URL in `TARGET_DATABASE_URL`, not `*.railway.internal` |

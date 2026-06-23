@@ -27,6 +27,7 @@ from orchestration.db.schema import (  # noqa: E402
     CombinedInteractionRow,
     CxoneTranscriptAnalysisRow,
     CxoneTranscriptRow,
+    ZendeskTicketFormRow,
     ZendeskTicketRow,
     init_database,
 )
@@ -36,6 +37,7 @@ TABLE_MODELS = {
     "cxone_transcripts": CxoneTranscriptRow,
     "cxone_transcript_analysis": CxoneTranscriptAnalysisRow,
     "zendesk_tickets": ZendeskTicketRow,
+    "zendesk_ticket_forms": ZendeskTicketFormRow,
     "combined_interactions": CombinedInteractionRow,
 }
 
@@ -74,6 +76,7 @@ TABLE_SYNC_TIMESTAMP_COLUMN: dict[str, str] = {
     "cxone_transcripts": "updated_at",
     "cxone_transcript_analysis": "updated_at",
     "zendesk_tickets": "row_updated_at",
+    "zendesk_ticket_forms": "row_updated_at",
     "combined_interactions": "updated_at",
 }
 
@@ -108,7 +111,7 @@ class SyncRowFilter:
 )
 @click.option(
     "--tables",
-    default="combined_interactions,zendesk_tickets,cxone_transcripts,cxone_transcript_analysis",
+    default="combined_interactions,zendesk_tickets,zendesk_ticket_forms,cxone_transcripts,cxone_transcript_analysis",
     show_default=True,
     help="Comma-separated tables to copy.",
 )

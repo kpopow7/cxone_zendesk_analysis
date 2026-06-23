@@ -47,11 +47,15 @@ python scripts/run_transcript_summary.py --timeframe last-week
 python scripts/sync_to_railway.py --tables combined_interactions,cxone_transcripts,cxone_transcript_analysis
 
 # 4. Build knowledge index ON Railway (avoids syncing large embedding vectors from PC)
-$env:DATABASE_URL = $env:TARGET_DATABASE_URL
-python scripts/build_knowledge_index.py --timeframe last-week
-
-# Or build locally first, then sync is not required for embeddings if step 4 runs on Railway DB
+#    --target-url points the build at Railway; defaults to TARGET_DATABASE_URL if set in the env.
+python scripts/build_knowledge_index.py --timeframe last-week --target-url $env:TARGET_DATABASE_URL
 ```
+
+> **Which database?** `build_knowledge_index.py` writes only to the database it targets, and
+> `analytics_knowledge_chunks` is **not** copied by `sync_to_railway.py`. So you must build the
+> index directly on each database where you want RAG. Pass `--target-url` (or `--database-url`)
+> to choose; without it, the build uses `DATABASE_URL` (local Docker by default). The script
+> prints the target host at startup — confirm it shows `*.proxy.rlwy.net` when building on Railway.
 
 ## Build / refresh the index
 
@@ -72,7 +76,15 @@ python scripts/build_knowledge_index.py `
 
 # Pilot
 python scripts/build_knowledge_index.py --timeframe yesterday --limit 50
+
+# Build on Railway instead of local (--database-url is an alias of --target-url)
+python scripts/build_knowledge_index.py --timeframe all --target-url $env:TARGET_DATABASE_URL
 ```
+
+**Target database:** without `--target-url`/`--database-url`, the build uses `DATABASE_URL`
+(local Docker by default). Use the Railway **public** URL (`*.proxy.rlwy.net`, not
+`*.railway.internal`) — the script rejects the private hostname and prints the target host at
+startup so you can confirm where the rows are going.
 
 Re-run after new transcript summaries are generated. Unchanged documents are skipped via `content_hash`.
 
@@ -104,9 +116,28 @@ CHATBOT_RAG_ENABLED=true
 CHATBOT_RAG_TOP_K=8
 CHATBOT_RAG_MIN_SIMILARITY=0.30
 OPENAI_EMBEDDING_MODEL=text-embedding-3-small
+
+# Conversation memory (follow-up questions build on earlier context)
+CHATBOT_MEMORY_ENABLED=true
+CHATBOT_MEMORY_MAX_TURNS=6
+CHATBOT_MEMORY_SUMMARY_ENABLED=true
 ```
 
 Set `CHATBOT_RAG_ENABLED=false` to revert to SQL-only mode.
+
+## Conversation memory
+
+The chatbot remembers the **current conversation** so follow-up questions build on
+earlier context (e.g. ask "How many remake calls last week?" then "Why are customers
+calling about those?"). Memory is per session and resets when the conversation ends
+(page reload / new login). It feeds routing, semantic retrieval, SQL generation, and
+the final answer.
+
+| Variable | Default | Purpose |
+|----------|---------|---------|
+| `CHATBOT_MEMORY_ENABLED` | `true` | Master switch. `false` = each question answered with no prior context. |
+| `CHATBOT_MEMORY_MAX_TURNS` | `6` | How many recent turns are kept verbatim in prompts. |
+| `CHATBOT_MEMORY_SUMMARY_ENABLED` | `true` | Roll older turns into a compact running summary so long chats stay in budget. Adds one short LLM call only when a conversation grows past `CHATBOT_MEMORY_MAX_TURNS`; set `false` to avoid the extra call. |
 
 ## Architecture
 

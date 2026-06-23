@@ -6,35 +6,38 @@ DROP VIEW IF EXISTS analytics_interactions CASCADE;
 
 CREATE VIEW analytics_interactions AS
 SELECT
-    segment_id,
-    ticket_id,
-    phone_call_ticket_id,
-    link_method,
-    interaction_start,
-    interaction_end,
-    call_direction,
-    media_type,
-    skill_name,
-    team_name,
-    agent_name,
-    client_sentiment,
-    agent_sentiment,
-    segment_summary,
-    left(transcript_text, 2000) AS transcript_preview,
-    ticket_subject,
-    ticket_description,
-    ticket_status,
-    ticket_priority,
-    ticket_tags,
-    zendesk_promoted_fields,
-    call_reason,
-    call_reason_code,
-    call_reason_source,
-    disposition_code,
-    disposition_label,
-    disposition_source,
-    built_at
-FROM combined_interactions;
+    ci.segment_id,
+    ci.ticket_id,
+    ci.phone_call_ticket_id,
+    ci.link_method,
+    ci.interaction_start,
+    ci.interaction_end,
+    ci.call_direction,
+    ci.media_type,
+    ci.skill_name,
+    ci.team_name,
+    ci.agent_name,
+    ci.client_sentiment,
+    ci.agent_sentiment,
+    ci.segment_summary,
+    left(ci.transcript_text, 2000) AS transcript_preview,
+    ci.ticket_subject,
+    ci.ticket_description,
+    ci.ticket_status,
+    ci.ticket_priority,
+    ci.ticket_tags,
+    ci.ticket_form_id,
+    f.name AS ticket_form_name,
+    ci.zendesk_promoted_fields,
+    ci.call_reason,
+    ci.call_reason_code,
+    ci.call_reason_source,
+    ci.disposition_code,
+    ci.disposition_label,
+    ci.disposition_source,
+    ci.built_at
+FROM combined_interactions AS ci
+LEFT JOIN zendesk_ticket_forms AS f ON f.form_id = ci.ticket_form_id;
 
 CREATE OR REPLACE VIEW analytics_transcript_summaries AS
 SELECT
@@ -66,7 +69,8 @@ JOIN cxone_transcripts AS t ON t.segment_id = a.segment_id;
 -- GRANT CONNECT ON DATABASE railway TO chatbot_reader;
 -- GRANT USAGE ON SCHEMA public TO chatbot_reader;
 -- GRANT SELECT ON analytics_interactions, analytics_transcript_summaries,
---   combined_interactions, cxone_transcript_analysis, cxone_transcripts, zendesk_tickets
+--   combined_interactions, cxone_transcript_analysis, cxone_transcripts, zendesk_tickets,
+--   zendesk_ticket_forms
 --   TO chatbot_reader;
 --
 -- Chatbot service DATABASE_URL:

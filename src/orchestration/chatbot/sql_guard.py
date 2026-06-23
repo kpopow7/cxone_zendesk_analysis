@@ -46,6 +46,7 @@ ALLOWED_RELATIONS = frozenset(
         "cxone_transcript_analysis",
         "cxone_transcripts",
         "zendesk_tickets",
+        "zendesk_ticket_forms",
     }
 )
 

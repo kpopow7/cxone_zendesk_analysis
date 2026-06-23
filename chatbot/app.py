@@ -18,6 +18,7 @@ if str(SRC) not in sys.path:
 
 from orchestration.chatbot.agent import ChatbotAgent  # noqa: E402
 from orchestration.chatbot.auth import load_chatbot_auth_users  # noqa: E402
+from orchestration.chatbot.memory import ConversationMemory  # noqa: E402
 from orchestration.chatbot.settings import get_chatbot_settings  # noqa: E402
 
 load_dotenv(ROOT / ".env")
@@ -73,13 +74,34 @@ def _history_to_legacy(history: list | None) -> list[tuple[str, str]]:
     return legacy_history
 
 
-def respond(message: str, history: list | None) -> str:
+def respond(
+    message: str,
+    history: list | None,
+    memory_state: dict | None,
+    form_types: list[str] | None = None,
+) -> str:
     if not message or not str(message).strip():
         return "Please enter a question about your call or ticket data."
 
+    # memory_state persists per browser session (the active conversation). It holds a
+    # ConversationMemory that accumulates context until the conversation is ended
+    # (page reload / new session). Seed it from the UI history on first use.
+    if memory_state is None:
+        memory_state = {}
+    memory = memory_state.get("memory")
+    if memory is None:
+        memory = ConversationMemory.from_pairs(
+            _history_to_legacy(history),
+            max_recent_turns=settings.chatbot_memory_max_turns,
+        )
+        memory_state["memory"] = memory
+
     try:
-        legacy_history = _history_to_legacy(history)
-        result = agent.ask(str(message).strip(), history=legacy_history)
+        result = agent.ask(
+            str(message).strip(),
+            memory=memory,
+            form_types=[t for t in (form_types or []) if t] or None,
+        )
         answer = (result.answer or "").strip()
         if not answer:
             return (
@@ -93,18 +115,41 @@ def respond(message: str, history: list | None) -> str:
         return f"Something went wrong: {exc}. Check DATABASE_URL and OPENAI_API_KEY."
 
 
-demo = gr.ChatInterface(
-    fn=respond,
-    type="messages",
-    title="Contact Center Analytics Assistant",
-    description=(
-        "Ask about call volume, reasons, dispositions, skills, trends, and contextual "
-        "questions about what customers are calling about (semantic search over call summaries). "
-        "Data is queried live from PostgreSQL (Railway). **Company login required.**"
-    ),
-    examples=EXAMPLE_QUESTIONS,
-    cache_examples=False,
+# Available ticket form types for the filter control (queried once at startup).
+FORM_TYPE_CHOICES: list[str] = (
+    agent.available_form_types() if settings.chatbot_form_filter_enabled else []
 )
+
+with gr.Blocks(title="Contact Center Analytics Assistant") as demo:
+    # Per-session memory store; resets when the conversation/session ends.
+    memory_state = gr.State()
+    additional_inputs: list = [memory_state]
+
+    if FORM_TYPE_CHOICES:
+        form_filter = gr.CheckboxGroup(
+            choices=FORM_TYPE_CHOICES,
+            value=[],
+            label="Ticket form types",
+            info="Limit answers to these Zendesk form types. Leave empty to include all forms.",
+        )
+        additional_inputs.append(form_filter)
+
+    gr.ChatInterface(
+        fn=respond,
+        type="messages",
+        title="Contact Center Analytics Assistant",
+        description=(
+            "Ask about call volume, reasons, dispositions, skills, trends, and contextual "
+            "questions about what customers are calling about (semantic search over call summaries). "
+            "Use the ticket form-type filter to focus on specific Zendesk forms (e.g. 'Assist (Internal)'). "
+            "The assistant remembers the current conversation, so you can ask follow-ups that "
+            "build on earlier questions. Data is queried live from PostgreSQL (Railway). "
+            "**Company login required.**"
+        ),
+        additional_inputs=additional_inputs,
+        examples=[[question] + [None] * len(additional_inputs) for question in EXAMPLE_QUESTIONS],
+        cache_examples=False,
+    )
 
 if __name__ == "__main__":
     demo.launch(

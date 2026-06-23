@@ -25,12 +25,22 @@ class ChatbotSettings(BaseSettings):
     chatbot_username: str | None = Field(default=None, alias="CHATBOT_USERNAME")
     chatbot_password: str | None = Field(default=None, alias="CHATBOT_PASSWORD")
 
+    # Ticket form-type filter: lets users restrict analysis to chosen Zendesk forms.
+    chatbot_form_filter_enabled: bool = Field(default=True, alias="CHATBOT_FORM_FILTER_ENABLED")
+
     chatbot_max_rows: int = Field(default=200, alias="CHATBOT_MAX_ROWS")
     chatbot_query_timeout_seconds: float = Field(default=15.0, alias="CHATBOT_QUERY_TIMEOUT_SECONDS")
     chatbot_show_sql: bool = Field(default=True, alias="CHATBOT_SHOW_SQL")
     chatbot_rag_enabled: bool = Field(default=True, alias="CHATBOT_RAG_ENABLED")
     chatbot_rag_top_k: int = Field(default=8, alias="CHATBOT_RAG_TOP_K")
     chatbot_rag_min_similarity: float = Field(default=0.30, alias="CHATBOT_RAG_MIN_SIMILARITY")
+
+    # Conversation memory: build on context across turns until the conversation ends.
+    chatbot_memory_enabled: bool = Field(default=True, alias="CHATBOT_MEMORY_ENABLED")
+    chatbot_memory_max_turns: int = Field(default=6, alias="CHATBOT_MEMORY_MAX_TURNS")
+    chatbot_memory_summary_enabled: bool = Field(
+        default=True, alias="CHATBOT_MEMORY_SUMMARY_ENABLED"
+    )
     openai_embedding_model: str = Field(
         default="text-embedding-3-small",
         alias="OPENAI_EMBEDDING_MODEL",

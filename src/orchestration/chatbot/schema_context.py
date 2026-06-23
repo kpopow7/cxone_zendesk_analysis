@@ -19,6 +19,8 @@ Columns:
 - link_method (text) — call_object_to_parent = fully linked; unmatched = no Zendesk match
 - ticket_subject, ticket_description, ticket_status, ticket_priority (text)
 - ticket_tags (jsonb array)
+- ticket_form_id (bigint) — numeric Zendesk ticket form id
+- ticket_form_name (text) — human ticket form type, e.g. "Assist (Internal)"; use this to group/filter by form type
 - call_reason (text) — unified reason across all Zendesk forms (human-readable)
 - call_reason_code (text) — raw Zendesk reason value
 - call_reason_source (text) — source field, e.g. cf_reason_for_contact_consumer
@@ -45,7 +47,13 @@ Columns:
 ## Fallback: combined_interactions
 Same as analytics_interactions but includes full transcript_text (large). Prefer analytics_interactions.
 
+## Ticket form types: zendesk_ticket_forms (lookup)
+Maps Zendesk ticket forms to readable names. Columns: form_id (bigint, PK), name (text), active (bool).
+analytics_interactions.ticket_form_name already resolves this, so prefer filtering/grouping on
+analytics_interactions.ticket_form_name. Query zendesk_ticket_forms directly only to list available form types.
+
 ## Business rules
+- To group or filter tickets by "form type" (e.g. "Assist (Internal)"), use ticket_form_name on analytics_interactions
 - For call reasons: use call_reason (not individual cf_reason_* JSON keys)
 - For dispositions: use disposition_label (not individual cf_disposition_* JSON keys)
 - Inbound calls: upper(replace(call_direction, '-', '_')) LIKE '%IN_BOUND%'
@@ -82,6 +90,24 @@ WHERE link_method = 'call_object_to_parent'
 GROUP BY disposition_label
 ORDER BY n DESC
 LIMIT 15;
+
+Call volume grouped by ticket form type last 7 days:
+SELECT ticket_form_name, COUNT(*) AS call_count
+FROM analytics_interactions
+WHERE interaction_start >= NOW() - INTERVAL '7 days'
+  AND ticket_form_name IS NOT NULL
+GROUP BY ticket_form_name
+ORDER BY call_count DESC
+LIMIT 20;
+
+Top call reasons for specific form types:
+SELECT call_reason, COUNT(*) AS n
+FROM analytics_interactions
+WHERE ticket_form_name IN ('Assist (Internal)')
+  AND call_reason IS NOT NULL
+GROUP BY call_reason
+ORDER BY n DESC
+LIMIT 20;
 
 Top skills last 7 days (inbound):
 SELECT skill_name, COUNT(*) AS call_count

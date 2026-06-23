@@ -184,6 +184,36 @@ class CombinedInteractionRow(Base):
     )
 
 
+class ZendeskTicketFormRow(Base):
+    """Zendesk ticket form definitions (form_id -> human name) for grouping tickets.
+
+    Populated from the Zendesk /api/v2/ticket_forms endpoint. Kept as a small
+    lookup table so analytics_interactions can resolve ticket_form_id to a
+    readable form type (e.g. "Assist (Internal)") without backfilling every row.
+    """
+
+    __tablename__ = "zendesk_ticket_forms"
+
+    form_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    name: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    display_name: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    active: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    position: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    raw_metadata: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
+    extracted_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    row_created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+    )
+    row_updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+        onupdate=func.now(),
+    )
+
+
 class ZendeskTicketCommentRow(Base):
     __tablename__ = "zendesk_ticket_comments"
 

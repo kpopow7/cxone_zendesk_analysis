@@ -57,17 +57,21 @@ Requires `OPENAI_API_KEY`.
 
 Run from your PC with **`TARGET_DATABASE_URL`** set. Sync order: lighter tables first; use small batches for large tables.
 
+- [ ] `python scripts/run_zendesk_forms_extract.py` (one-time / when forms change — fetches form names)
 - [ ] `python scripts/sync_to_railway.py --tables zendesk_tickets`
+- [ ] `python scripts/sync_to_railway.py --tables zendesk_ticket_forms`
 - [ ] `python scripts/sync_to_railway.py --tables cxone_transcripts --batch-size 10`
 - [ ] `python scripts/sync_to_railway.py --tables combined_interactions --batch-size 5`
 - [ ] `python scripts/sync_to_railway.py --tables cxone_transcript_analysis` (after Step 4b)
 
 Re-run sync after daily pipeline updates. `sync_to_railway.py` refreshes analytics views on Railway automatically.
 
+- [ ] Verify parity after syncing: `python scripts/check_sync_parity.py` (compares local vs Railway row counts + date ranges; exits non-zero if anything is out of sync)
+
 ### Phase D — RAG + chatbot (Railway)
 
 - [ ] On Railway Postgres → Query: `CREATE EXTENSION IF NOT EXISTS vector;`
-- [ ] Build knowledge index **on Railway DB:** `$env:DATABASE_URL = $env:TARGET_DATABASE_URL` then `python scripts/build_knowledge_index.py --timeframe last-week` — see [docs/RAG.md](docs/RAG.md)
+- [ ] Build knowledge index **on Railway DB:** `python scripts/build_knowledge_index.py --timeframe last-week --target-url $env:TARGET_DATABASE_URL` (the table is not synced — build it directly on Railway) — see [docs/RAG.md](docs/RAG.md)
 - [ ] Deploy chatbot (Gradio) with `DATABASE_URL` = Railway **private** URL, `OPENAI_API_KEY`, `CHATBOT_*` auth — [docs/CHATBOT_RAILWAY.md](docs/CHATBOT_RAILWAY.md)
 
 ### Daily (ongoing)
@@ -135,7 +139,9 @@ scripts/
   transcript_summary.json.example  # Step 4b transcript LLM analysis
   disposition_label_map.json.example # Step 4 disposition labels
   generate_disposition_label_map.py  # Scaffold disposition labels from DB
+  run_zendesk_forms_extract.py     # Sync Zendesk ticket form names (for grouping/filtering)
   sync_to_railway.py               # Copy tables to Railway Postgres
+  check_sync_parity.py             # Verify local vs Railway row counts + dates line up
   build_knowledge_index.py         # RAG embeddings (pgvector)
   railway_analytics_setup.sql      # Analytics view for chatbot
   probe_zendesk.py
@@ -702,6 +708,43 @@ python scripts/sync_to_railway.py --tables cxone_transcripts,cxone_transcript_an
 
 (`sync_to_railway.py` also refreshes analytics views on the target DB.)
 
+### Verify sync parity (`check_sync_parity.py`)
+
+Before trusting the hosted chatbot's answers, confirm the data actually made it to Railway. `scripts/check_sync_parity.py` compares the **source** DB (local `DATABASE_URL`) against the **target** DB (`TARGET_DATABASE_URL`, the public Railway URL) for each table and reports whether **row counts and dates line up**:
+
+- Total row count per table (source vs target, with delta)
+- Business-date range — `min`/`max` of `interaction_start` (cxone/combined), `created_at` (zendesk), or `analyzed_at` (transcript analysis)
+- Freshness — `max(updated_at / row_updated_at)` on each side
+- A **per-day row-count breakdown** so a day that was never synced (or only partially synced) is flagged explicitly
+
+```powershell
+# Compare all synced tables (local vs Railway)
+python scripts/check_sync_parity.py
+
+# Just the day you synced, listing any days that differ
+python scripts/check_sync_parity.py --start 2026-06-22 --end 2026-06-22 --show-days
+
+# Check a single database's internal consistency (point source at target)
+python scripts/check_sync_parity.py --target-url $env:DATABASE_URL
+```
+
+The command exits non-zero when any table is out of sync, so it can gate a daily cron / CI step. Tables: `combined_interactions`, `zendesk_tickets`, `cxone_transcripts`, `cxone_transcript_analysis` by default (add `zendesk_ticket_comments` via `--tables`). Because the daily sync is date-scoped, global counts only match after a full sync — pass the same `--start/--end` window you synced to compare apples-to-apples.
+
+### Group & filter by Zendesk ticket form type
+
+Tickets can be grouped by their **Zendesk ticket form** (e.g. "Assist (Internal)", "Consumer"). The raw ticket payload only carries the numeric `ticket_form_id`, so the readable name is fetched separately into a small lookup table, `zendesk_ticket_forms` (`form_id → name`):
+
+```powershell
+# Fetch form names from Zendesk (/api/v2/ticket_forms) into zendesk_ticket_forms
+python scripts/run_zendesk_forms_extract.py            # use --dry-run to preview the list
+# Copy the lookup table to Railway so the hosted chatbot can see the names
+python scripts/sync_to_railway.py --tables zendesk_ticket_forms
+```
+
+The `analytics_interactions` view resolves `ticket_form_id` to `ticket_form_name` via a LEFT JOIN, so **no per-row backfill is needed** — historical rows pick up the name as soon as the lookup table is populated. Forms rarely change; re-run the extract only when you add/rename a form in Zendesk.
+
+**In the chatbot:** when `zendesk_ticket_forms` has data, a **"Ticket form types"** picker appears in the UI. Selecting one or more forms restricts every generated query to `ticket_form_name IN (...)`; leaving it empty includes all forms. Users can also ask grouping questions directly (e.g. "call volume by ticket form type last week"). Set `CHATBOT_FORM_FILTER_ENABLED=false` to hide the picker.
+
 ### Configure
 
 ```powershell
@@ -764,9 +807,12 @@ python scripts/build_knowledge_index.py --timeframe last-week
 
 # Custom date range (filters on interaction_start)
 python scripts/build_knowledge_index.py --start 2026-03-05 --end 2026-03-11
+
+# Build on Railway (the analytics_knowledge_chunks table is NOT synced — build it there directly)
+python scripts/build_knowledge_index.py --timeframe last-week --target-url $env:TARGET_DATABASE_URL
 ```
 
-On Railway, point `DATABASE_URL` at `TARGET_DATABASE_URL` and run the same command after syncing tables.
+Pass `--target-url` (alias `--database-url`) with the Railway **public** URL to build the index there after syncing the base tables. Without it, the build targets `DATABASE_URL` (local Docker). The script prints the target host at startup.
 
 ---
 

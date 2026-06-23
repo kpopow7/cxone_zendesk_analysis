@@ -78,6 +78,7 @@ def test_sync_timestamp_columns_cover_all_tables() -> None:
         "cxone_transcripts": "updated_at",
         "cxone_transcript_analysis": "updated_at",
         "zendesk_tickets": "row_updated_at",
+        "zendesk_ticket_forms": "row_updated_at",
         "combined_interactions": "updated_at",
     }
     assert TABLE_SYNC_TIMESTAMP_COLUMN == expected

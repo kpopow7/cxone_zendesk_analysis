@@ -31,9 +31,13 @@ def retrieve_knowledge_chunks(
     top_k: int = 8,
     min_similarity: float = 0.30,
     timeout_seconds: float = 90.0,
+    embed_query: str | None = None,
 ) -> list[RetrievedChunk]:
+    # embed_query lets the caller include conversation context so follow-up
+    # questions ("what about outbound?") still match the established topic.
+    text_to_embed = embed_query if embed_query and embed_query.strip() else question
     query_vector = embed_texts(
-        [question],
+        [text_to_embed],
         api_key=api_key,
         model=embedding_model,
         base_url=openai_base_url,
