@@ -32,7 +32,7 @@ Complete these on your PC first:
 - [ ] Local pipeline runs and loads data into Docker Postgres (`DATABASE_URL=localhost:5433`)
 - [ ] `TARGET_DATABASE_URL` in `.env` uses the **public** Postgres URL (not `postgres.railway.internal`)
 - [ ] `python scripts/sync_to_railway.py` completes successfully
-- [ ] Analytics views exist on Railway (`analytics_interactions`, `analytics_transcript_summaries` if using Step 4b)
+- [ ] Analytics views exist on Railway (`analytics_interactions`, `analytics_transcript_summaries` if using Step 4b, `analytics_reduction_recommendations` for ranked reasons + fixes)
 - [ ] Knowledge index built for RAG **on the Railway DB** (`python scripts/build_knowledge_index.py --target-url $env:TARGET_DATABASE_URL` — the `analytics_knowledge_chunks` table is not synced, so build it directly on Railway; see [docs/RAG.md](../docs/RAG.md))
 - [ ] This repo is pushed to GitHub (Railway deploys from GitHub)
 
@@ -64,7 +64,9 @@ python scripts/sync_to_railway.py
 
 ### Create the analytics view (required for the chatbot)
 
-The chatbot queries **`analytics_interactions`** (Zendesk-linked calls) and optionally **`analytics_transcript_summaries`** (per-call LLM transcript reasons from Step 4b). `sync_to_railway.py` creates/refreshes these views on the target DB; you can also run `scripts/railway_analytics_setup.sql` manually.
+The chatbot queries **`analytics_interactions`** (Zendesk-linked calls), optionally **`analytics_transcript_summaries`** (per-call LLM transcript reasons from Step 4b), and **`analytics_reduction_recommendations`** (latest ranked reasons + recommended fixes from `run_transcript_summary.py --full-report`). `sync_to_railway.py` creates/refreshes these views on the target DB; you can also run `scripts/railway_analytics_setup.sql` manually.
+
+> `analytics_reduction_recommendations` surfaces the **reduction report** (ranked reasons WITH recommendations) so the chatbot can answer "what's driving contacts and what should we do?". It reads the latest run from `transcript_reduction_reports` / `transcript_reduction_report_reasons`, which `sync_to_railway.py` now copies by default.
 
 See **[Running `railway_analytics_setup.sql` on Railway](#running-railway_analytics_setupsql-on-railway)** below for full steps.
 
@@ -80,7 +82,7 @@ Re-run `sync_to_railway.py` after daily pipeline jobs.
 
 ## Running `railway_analytics_setup.sql` on Railway
 
-This script creates (or updates) `analytics_interactions` and `analytics_transcript_summaries`. The chatbot and example SQL depend on them.
+This script creates (or updates) `analytics_interactions`, `analytics_transcript_summaries`, and `analytics_reduction_recommendations` (plus the `transcript_reduction_reports` / `transcript_reduction_report_reasons` tables it reads). The chatbot and example SQL depend on them.
 
 **Prerequisites**
 

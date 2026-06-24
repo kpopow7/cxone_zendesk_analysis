@@ -8,6 +8,7 @@ from orchestration.analysis.timeframes import TimeWindow
 from orchestration.analysis.transcript_summary_progress import TranscriptSummaryProgress
 from orchestration.analysis.transcript_summary_report import (
     TranscriptSummaryReport,
+    persist_reduction_report,
     run_transcript_summary,
 )
 from orchestration.config import Settings
@@ -16,6 +17,7 @@ from orchestration.config import Settings
 @dataclass(frozen=True)
 class TranscriptSummaryResult:
     report: TranscriptSummaryReport
+    report_id: int | None = None
 
 
 def run_transcript_summary_step(
@@ -47,4 +49,8 @@ def run_transcript_summary_step(
         classify_only=classify_only,
         progress=progress,
     )
-    return TranscriptSummaryResult(report=report)
+
+    # Full reports carry ranked reasons + recommendations; persist them so the chatbot
+    # can query fixes (analytics_reduction_recommendations), not just per-call rows.
+    report_id = persist_reduction_report(report, settings=settings)
+    return TranscriptSummaryResult(report=report, report_id=report_id)

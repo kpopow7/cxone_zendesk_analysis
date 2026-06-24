@@ -42,9 +42,12 @@ ALLOWED_RELATIONS = frozenset(
     {
         "analytics_interactions",
         "analytics_transcript_summaries",
+        "analytics_reduction_recommendations",
         "combined_interactions",
         "cxone_transcript_analysis",
         "cxone_transcripts",
+        "transcript_reduction_reports",
+        "transcript_reduction_report_reasons",
         "zendesk_tickets",
         "zendesk_ticket_forms",
     }

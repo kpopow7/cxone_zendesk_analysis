@@ -43,6 +43,9 @@ from orchestration.db.analytics_views import ensure_analytics_views
 from orchestration.db.schema import (
     CxoneTranscriptAnalysisRow,
     CxoneTranscriptRow,
+    TranscriptReductionReasonRow,
+    TranscriptReductionReportRow,
+    ensure_reduction_report_tables,
     ensure_transcript_analysis_table,
 )
 from orchestration.db.session import get_engine, get_session_factory
@@ -1416,3 +1419,105 @@ def write_report_markdown(report: TranscriptSummaryReport, path: Path) -> None:
             lines.append(f"- {rec}")
         lines.append("")
     path.write_text("\n".join(lines), encoding="utf-8")
+
+
+@dataclass
+class ReductionReportRecords:
+    """Pure, DB-agnostic representation of a report ready to persist."""
+
+    header: dict[str, Any]
+    reasons: list[dict[str, Any]]
+
+
+def _parse_iso_datetime(value: Any) -> datetime | None:
+    if not value:
+        return None
+    if isinstance(value, datetime):
+        return value
+    try:
+        return datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
+def build_reduction_report_records(report: TranscriptSummaryReport) -> ReductionReportRecords:
+    """Flatten a report into header + per-reason rows (no DB access — easy to test)."""
+    timeframe = report.timeframe or {}
+    generated_at = _parse_iso_datetime(report.generated_at) or datetime.now(timezone.utc)
+
+    header = {
+        "generated_at": generated_at,
+        "timeframe_preset": timeframe.get("preset"),
+        "timeframe_label": timeframe.get("label"),
+        "timeframe_start": _parse_iso_datetime(timeframe.get("start")),
+        "timeframe_end": _parse_iso_datetime(timeframe.get("end")),
+        "transcripts_analyzed": int(report.totals.get("transcripts_analyzed", 0) or 0),
+        "reason_count": len(report.top_primary_reasons),
+        "filters": report.filters or {},
+        "totals": report.totals or {},
+        "classification": report.classification or {},
+        "llm": report.llm or {},
+        "insights": report.insights or [],
+    }
+
+    reasons: list[dict[str, Any]] = []
+    for rank, bucket in enumerate(report.top_primary_reasons, start=1):
+        recommendations = list(bucket.recommendations or [])
+        reasons.append(
+            {
+                "generated_at": generated_at,
+                "timeframe_label": timeframe.get("label"),
+                "rank": rank,
+                "primary_reason": bucket.primary_reason,
+                "primary_reason_key": bucket.primary_key,
+                "call_count": bucket.count,
+                "share_pct": bucket.share_pct,
+                "importance_score": bucket.importance_score,
+                "negative_sentiment_pct": bucket.negative_sentiment_pct,
+                "recommendation_source": bucket.recommendation_source,
+                "recommendations": recommendations,
+                "recommendations_text": "\n".join(recommendations) or None,
+                "reduction_hints": list(bucket.reduction_hints or []),
+                "secondary": [asdict(s) for s in bucket.secondary],
+                "sample_summaries": list(bucket.sample_summaries or []),
+                "sample_segment_ids": list(bucket.sample_segment_ids or []),
+            }
+        )
+    return ReductionReportRecords(header=header, reasons=reasons)
+
+
+def persist_reduction_report(
+    report: TranscriptSummaryReport,
+    *,
+    settings: Settings,
+) -> int | None:
+    """Persist a ranked reduction report (reasons + recommendations) to Postgres.
+
+    Returns the new report_id, or None when there is nothing to persist (no buckets,
+    i.e. a classify-only run). The latest persisted run is exposed to the chatbot via
+    the analytics_reduction_recommendations view.
+    """
+    records = build_reduction_report_records(report)
+    if not records.reasons:
+        return None
+
+    engine = get_engine(settings.database_url)
+    ensure_reduction_report_tables(engine)
+
+    session_factory = get_session_factory(settings.database_url)
+    with session_factory() as session:
+        header_row = TranscriptReductionReportRow(**records.header)
+        session.add(header_row)
+        session.flush()
+        report_id = header_row.report_id
+        for reason in records.reasons:
+            session.add(TranscriptReductionReasonRow(report_id=report_id, **reason))
+        session.commit()
+
+    ensure_analytics_views(engine)
+    logger.info(
+        "Persisted reduction report %s with %d ranked reason(s).",
+        report_id,
+        len(records.reasons),
+    )
+    return report_id

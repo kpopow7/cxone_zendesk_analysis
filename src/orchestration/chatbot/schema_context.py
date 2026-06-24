@@ -44,6 +44,31 @@ Columns:
 - analysis_model (text), analyzed_at (timestamptz)
 - transcript_preview (text) — first ~2000 chars of transcript
 
+## Reduction recommendations: analytics_reduction_recommendations (use for "what should we do / how to reduce")
+Ranked root-cause reasons WITH recommended fixes from the latest reduction report run
+(run_transcript_summary.py --full-report). Use this when the user asks what is driving contacts
+AND what to do about it, how to reduce volume, top reasons with recommendations, or "fixes".
+This view returns only the most recent report run (already ranked by rank ascending = highest volume first).
+
+Columns:
+- report_id (bigint), generated_at (timestamptz) — when the report was produced
+- timeframe_label (text) — e.g. "last week (2026-06-09 → 2026-06-15)"; timeframe_start, timeframe_end (timestamptz)
+- transcripts_analyzed (int) — calls analyzed in this report
+- rank (int) — 1 = top reason by volume
+- primary_reason (text) — root-cause reason
+- call_count (int) — calls for this reason; share_pct (float) — % of analyzed calls
+- importance_score (float, 0–100); negative_sentiment_pct (float)
+- recommendation_source (text) — 'llm' or 'rules'
+- recommendations_text (text) — newline-separated recommended fixes (prefer this for display)
+- recommendations (jsonb array) — same fixes as an array
+- reduction_hints (jsonb array) — sample per-call reduction hints
+- secondary (jsonb) — secondary/tertiary breakdown for this reason
+- sample_segment_ids (jsonb array) — example calls for drill-down
+
+This view is pre-aggregated; do NOT add GROUP BY. Order by rank for top reasons. It already
+contains only the latest run, so no date filter is needed unless the user asks for history
+(query transcript_reduction_reports / transcript_reduction_report_reasons for older runs).
+
 ## Fallback: combined_interactions
 Same as analytics_interactions but includes full transcript_text (large). Prefer analytics_interactions.
 
@@ -134,6 +159,19 @@ FROM analytics_transcript_summaries
 WHERE primary_reason ILIKE '%remake%'
 ORDER BY interaction_start DESC
 LIMIT 10;
+
+Top reasons driving contacts and what to do about them (latest reduction report):
+SELECT rank, primary_reason, call_count, share_pct, recommendation_source, recommendations_text
+FROM analytics_reduction_recommendations
+ORDER BY rank
+LIMIT 10;
+
+Recommendations for a specific reason (latest reduction report):
+SELECT primary_reason, call_count, share_pct, recommendations_text, reduction_hints
+FROM analytics_reduction_recommendations
+WHERE primary_reason ILIKE '%order status%'
+ORDER BY rank
+LIMIT 5;
 """.strip()
 
 

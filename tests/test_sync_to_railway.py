@@ -80,5 +80,14 @@ def test_sync_timestamp_columns_cover_all_tables() -> None:
         "zendesk_tickets": "row_updated_at",
         "zendesk_ticket_forms": "row_updated_at",
         "combined_interactions": "updated_at",
+        "transcript_reduction_reports": "updated_at",
+        "transcript_reduction_report_reasons": "created_at",
     }
     assert TABLE_SYNC_TIMESTAMP_COLUMN == expected
+
+
+def test_reduction_report_tables_are_syncable() -> None:
+    from scripts.sync_to_railway import TABLE_MODELS
+
+    assert "transcript_reduction_reports" in TABLE_MODELS
+    assert "transcript_reduction_report_reasons" in TABLE_MODELS

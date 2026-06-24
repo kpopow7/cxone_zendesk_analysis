@@ -3,6 +3,8 @@ from __future__ import annotations
 from sqlalchemy.engine import Engine
 from sqlalchemy.sql import text
 
+from orchestration.db.schema import ensure_reduction_report_tables
+
 ANALYTICS_INTERACTIONS_VIEW = """
 CREATE OR REPLACE VIEW analytics_interactions AS
 SELECT
@@ -65,11 +67,48 @@ FROM cxone_transcript_analysis AS a
 JOIN cxone_transcripts AS t ON t.segment_id = a.segment_id
 """
 
+# Surfaces the most recent reduction report run as flat rows so the chatbot can answer
+# "what's driving contacts and what should we do?" — ranked reasons + recommendations.
+ANALYTICS_REDUCTION_RECOMMENDATIONS_VIEW = """
+CREATE OR REPLACE VIEW analytics_reduction_recommendations AS
+SELECT
+    rep.report_id,
+    rep.generated_at,
+    rep.timeframe_label,
+    rep.timeframe_start,
+    rep.timeframe_end,
+    rep.transcripts_analyzed,
+    rsn.rank,
+    rsn.primary_reason,
+    rsn.call_count,
+    rsn.share_pct,
+    rsn.importance_score,
+    rsn.negative_sentiment_pct,
+    rsn.recommendation_source,
+    rsn.recommendations_text,
+    rsn.recommendations,
+    rsn.reduction_hints,
+    rsn.secondary,
+    rsn.sample_segment_ids
+FROM transcript_reduction_report_reasons AS rsn
+JOIN transcript_reduction_reports AS rep ON rep.report_id = rsn.report_id
+WHERE rep.report_id = (
+    SELECT report_id
+    FROM transcript_reduction_reports
+    ORDER BY generated_at DESC, report_id DESC
+    LIMIT 1
+)
+"""
+
 
 def ensure_analytics_views(engine: Engine) -> None:
     """Create or refresh analytics views used by the chatbot and reporting."""
+    # The reduction recommendations view reads these tables; make sure they exist first.
+    ensure_reduction_report_tables(engine)
     with engine.begin() as connection:
         # Postgres CREATE OR REPLACE cannot insert columns mid-view; drop first.
         connection.execute(text("DROP VIEW IF EXISTS analytics_interactions CASCADE"))
         connection.execute(text(ANALYTICS_INTERACTIONS_VIEW))
         connection.execute(text(ANALYTICS_TRANSCRIPT_SUMMARIES_VIEW))
+        connection.execute(text("DROP VIEW IF EXISTS analytics_reduction_recommendations CASCADE"))
+        connection.execute(text(ANALYTICS_REDUCTION_RECOMMENDATIONS_VIEW))

@@ -4,6 +4,8 @@ from datetime import date
 from zoneinfo import ZoneInfo
 
 from orchestration.steps.daily_pipeline import (
+    railway_classification_sync_args,
+    railway_classification_sync_tables,
     railway_sync_cli_args,
     railway_sync_filter,
     railway_sync_tables,
@@ -33,6 +35,33 @@ def test_railway_sync_tables_respects_skipped_steps() -> None:
         "combined_interactions",
     ]
     assert railway_sync_tables(["cxone", "zendesk", "combined"]) == []
+
+
+def test_railway_classification_sync_tables_when_classification_ran() -> None:
+    assert railway_classification_sync_tables([]) == [
+        "cxone_transcript_analysis",
+        "transcript_reduction_reports",
+        "transcript_reduction_report_reasons",
+    ]
+
+
+def test_railway_classification_sync_tables_empty_when_skipped() -> None:
+    assert railway_classification_sync_tables(["classification"]) == []
+    # Skips can carry a reason annotation, e.g. "classification (no OPENAI_API_KEY)".
+    assert railway_classification_sync_tables(["classification (dry-run)"]) == []
+
+
+def test_railway_classification_sync_args_scopes_by_since() -> None:
+    window = _window_for(date(2026, 6, 10))
+    tables = railway_classification_sync_tables([])
+
+    args = railway_classification_sync_args(window, tables)
+
+    assert args[0] == "--tables"
+    assert "cxone_transcript_analysis" in args[1]
+    assert "--since" in args
+    since_value = args[args.index("--since") + 1]
+    assert since_value == window.cxone_start.isoformat()
 
 
 def test_railway_sync_filter_uses_target_day_not_zendesk_lookback() -> None:

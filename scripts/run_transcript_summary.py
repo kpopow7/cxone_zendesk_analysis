@@ -198,6 +198,18 @@ def main(
     report = result.report
     click.echo(format_report_text(report), nl=False)
 
+    if result.report_id is not None:
+        click.echo(
+            f"\nPersisted reduction report #{result.report_id} -> "
+            "analytics_reduction_recommendations (queryable by the chatbot).",
+            err=True,
+        )
+    elif full_report:
+        click.echo(
+            "\nNo ranked reasons to persist (no classified calls in window).",
+            err=True,
+        )
+
     if json_output:
         write_report_json(report, json_output)
         click.echo(f"\nWrote JSON: {json_output}", err=True)

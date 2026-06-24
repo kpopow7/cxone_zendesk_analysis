@@ -1,6 +1,6 @@
 from datetime import date, datetime, timezone
 
-from sqlalchemy import BigInteger, Boolean, Date, DateTime, String, Text, func
+from sqlalchemy import BigInteger, Boolean, Date, DateTime, Float, String, Text, func
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
@@ -70,6 +70,75 @@ class CxoneTranscriptAnalysisRow(Base):
         nullable=False,
         server_default=func.now(),
         onupdate=func.now(),
+    )
+
+
+class TranscriptReductionReportRow(Base):
+    """Header for one ranked reduction report run (from run_transcript_summary --full-report).
+
+    Each run is stored as an immutable snapshot so the chatbot can read the latest
+    ranked reasons + recommendations and so trends across runs remain queryable.
+    """
+
+    __tablename__ = "transcript_reduction_reports"
+
+    report_id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    generated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, index=True
+    )
+    timeframe_preset: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    timeframe_label: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    timeframe_start: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    timeframe_end: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    transcripts_analyzed: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0)
+    reason_count: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0)
+    filters: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
+    totals: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
+    classification: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
+    llm: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
+    insights: Mapped[list] = mapped_column(JSONB, nullable=False, default=list)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+        onupdate=func.now(),
+    )
+
+
+class TranscriptReductionReasonRow(Base):
+    """One ranked primary reason (with recommendations) belonging to a reduction report run."""
+
+    __tablename__ = "transcript_reduction_report_reasons"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    report_id: Mapped[int] = mapped_column(BigInteger, nullable=False, index=True)
+    generated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, index=True
+    )
+    timeframe_label: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    rank: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0)
+    primary_reason: Mapped[str] = mapped_column(String(512), nullable=False, default="")
+    primary_reason_key: Mapped[str] = mapped_column(String(512), nullable=False, default="")
+    call_count: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0)
+    share_pct: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    importance_score: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    negative_sentiment_pct: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    recommendation_source: Mapped[str] = mapped_column(String(32), nullable=False, default="rules")
+    recommendations: Mapped[list] = mapped_column(JSONB, nullable=False, default=list)
+    recommendations_text: Mapped[str | None] = mapped_column(Text, nullable=True)
+    reduction_hints: Mapped[list] = mapped_column(JSONB, nullable=False, default=list)
+    secondary: Mapped[list] = mapped_column(JSONB, nullable=False, default=list)
+    sample_summaries: Mapped[list] = mapped_column(JSONB, nullable=False, default=list)
+    sample_segment_ids: Mapped[list] = mapped_column(JSONB, nullable=False, default=list)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
     )
 
 
@@ -254,6 +323,12 @@ def ensure_transcript_analysis_table(database_url: str) -> None:
     from orchestration.db.session import get_engine
 
     CxoneTranscriptAnalysisRow.__table__.create(get_engine(database_url), checkfirst=True)
+
+
+def ensure_reduction_report_tables(engine) -> None:
+    """Create the reduction report tables if missing (safe before the analytics view)."""
+    TranscriptReductionReportRow.__table__.create(engine, checkfirst=True)
+    TranscriptReductionReasonRow.__table__.create(engine, checkfirst=True)
 
 
 def init_database(database_url: str) -> None:

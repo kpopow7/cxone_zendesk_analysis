@@ -27,6 +27,8 @@ from orchestration.db.schema import (  # noqa: E402
     CombinedInteractionRow,
     CxoneTranscriptAnalysisRow,
     CxoneTranscriptRow,
+    TranscriptReductionReasonRow,
+    TranscriptReductionReportRow,
     ZendeskTicketFormRow,
     ZendeskTicketRow,
     init_database,
@@ -39,6 +41,8 @@ TABLE_MODELS = {
     "zendesk_tickets": ZendeskTicketRow,
     "zendesk_ticket_forms": ZendeskTicketFormRow,
     "combined_interactions": CombinedInteractionRow,
+    "transcript_reduction_reports": TranscriptReductionReportRow,
+    "transcript_reduction_report_reasons": TranscriptReductionReasonRow,
 }
 
 # Large text/json columns blow up multi-row upserts on Railway Postgres.
@@ -78,6 +82,8 @@ TABLE_SYNC_TIMESTAMP_COLUMN: dict[str, str] = {
     "zendesk_tickets": "row_updated_at",
     "zendesk_ticket_forms": "row_updated_at",
     "combined_interactions": "updated_at",
+    "transcript_reduction_reports": "updated_at",
+    "transcript_reduction_report_reasons": "created_at",
 }
 
 TABLE_INTERACTION_START_COLUMN: dict[str, str] = {
@@ -111,7 +117,7 @@ class SyncRowFilter:
 )
 @click.option(
     "--tables",
-    default="combined_interactions,zendesk_tickets,zendesk_ticket_forms,cxone_transcripts,cxone_transcript_analysis",
+    default="combined_interactions,zendesk_tickets,zendesk_ticket_forms,cxone_transcripts,cxone_transcript_analysis,transcript_reduction_reports,transcript_reduction_report_reasons",
     show_default=True,
     help="Comma-separated tables to copy.",
 )

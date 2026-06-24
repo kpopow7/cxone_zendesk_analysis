@@ -1,6 +1,7 @@
 # Daily pipeline schedule
 
-Run CXone extract, Zendesk extract, and combined dataset update on a fixed schedule.
+Run CXone extract, Zendesk extract, combined dataset update, transcript classification
+(reasons + reduction report), and the chatbot RAG knowledge index on a fixed schedule.
 
 ## One command (manual or cron)
 
@@ -27,8 +28,24 @@ python scripts/run_daily_pipeline.py --sync-railway
 | CXone | `run_cxone_extract` logic | Target calendar day (`interaction_start`) |
 | Zendesk | `run_zendesk_extract` logic | Target day **plus** `--zendesk-lookback-days` (default **2**) for bridge tickets created slightly earlier |
 | Combined | `run_build_combined_dataset` | Same day as CXone, **incremental upsert** (no `--rebuild`) |
+| Classification | `run_transcript_summary_step` (full report) | Target day; LLM-classifies that day's transcripts into `cxone_transcript_analysis` and persists ranked reasons + recommendations to `analytics_reduction_recommendations` |
+| Knowledge index | `build_knowledge_index` | Target day; (re)embeds interactions into `analytics_knowledge_chunks` for chatbot RAG |
 
 Default target day = **yesterday** in the chosen timezone.
+
+> **LLM cost / requirements:** Classification and the knowledge index both call OpenAI and
+> need `OPENAI_API_KEY`. If the key is unset they are skipped with a warning. Disable them
+> per run with `--skip-classification` / `--skip-knowledge-index`. Classification covers the
+> whole target day (already-classified calls are skipped via cache, so daily runs only pay for
+> new calls).
+
+### Railway (hosted chatbot) behavior
+
+With `--sync-railway`, after the local load the runner:
+
+1. Syncs the relational tables (`cxone_transcripts`, `zendesk_tickets`, `combined_interactions`) scoped to the target day.
+2. Syncs the freshly classified rows (`cxone_transcript_analysis`, `transcript_reduction_reports`, `transcript_reduction_report_reasons`) scoped by `--since`.
+3. Builds the RAG knowledge index **directly on the Railway DB** (so each day's content is embedded once, on the DB the chatbot reads).
 
 ---
 
@@ -129,8 +146,11 @@ jobs:
 1. **CXone** list extract for yesterday  
 2. **Zendesk** tickets (yesterday + 2-day lookback)  
 3. **Combined** incremental upsert for yesterday’s segments  
-4. **Optional:** `sync_to_railway.py` if DB is local but chatbot is on Railway  
+4. **Classification** of yesterday's transcripts → reasons + reduction report  
+5. **Knowledge index** refresh for chatbot RAG  
+6. **Optional:** `--sync-railway` if DB is local but chatbot is on Railway  
 
+`run_daily_pipeline.py` runs steps 1–5 automatically (4–5 need `OPENAI_API_KEY`).
 Do **not** use `--rebuild` on daily runs; full rebuild is only for initial load or link-rule changes.
 
 ---
@@ -144,3 +164,5 @@ Do **not** use `--rebuild` on daily runs; full rebuild is only for initial load 
 | Postgres connection failed | Start Docker: `docker compose up -d` |
 | Task never runs | PC must be on at scheduled time, or enable "Run task as soon as possible after a scheduled start is missed" in Task Scheduler |
 | Railway chatbot stale | Add `-SyncRailway` to scheduled task and set `TARGET_DATABASE_URL` in `.env` |
+| Classification / index skipped | Set `OPENAI_API_KEY` in `.env` (steps skip with a warning when it's missing) |
+| `relation "zendesk_ticket_forms" does not exist` | Initialize schema once: `python -c "import sys; sys.path.insert(0,'src'); from orchestration.db.schema import init_database; from orchestration.config import get_settings; init_database(get_settings().database_url)"` |

@@ -49,3 +49,14 @@ def test_allows_analytics_transcript_summaries() -> None:
     """
     result = validate_sql(sql)
     assert result.ok, result.error
+
+
+def test_allows_analytics_reduction_recommendations() -> None:
+    sql = """
+    SELECT rank, primary_reason, call_count, share_pct, recommendations_text
+    FROM analytics_reduction_recommendations
+    ORDER BY rank
+    LIMIT 10
+    """
+    result = validate_sql(sql)
+    assert result.ok, result.error
