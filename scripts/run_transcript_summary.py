@@ -16,13 +16,13 @@ if str(SRC) not in sys.path:
 
 from orchestration.analysis.call_selection import CallSelectionOverrides  # noqa: E402
 from orchestration.analysis.transcript_summary_progress import TranscriptSummaryProgress  # noqa: E402
-from orchestration.analysis.timeframes import resolve_time_window  # noqa: E402
+from orchestration.analysis.timeframes import parse_window_bound, resolve_time_window  # noqa: E402
 from orchestration.analysis.transcript_summary_report import (  # noqa: E402
     format_report_text,
     write_report_json,
     write_report_markdown,
 )
-from orchestration.config import get_settings, parse_iso_datetime  # noqa: E402
+from orchestration.config import get_settings  # noqa: E402
 from orchestration.steps.transcript_summary import run_transcript_summary_step  # noqa: E402
 
 
@@ -137,8 +137,8 @@ def main(
     load_dotenv(ROOT / ".env")
     settings = get_settings()
 
-    start_dt = parse_iso_datetime(start) if start else None
-    end_dt = parse_iso_datetime(end) if end else None
+    start_dt = parse_window_bound(start, is_end=False) if start else None
+    end_dt = parse_window_bound(end, is_end=True) if end else None
     if (start and not end) or (end and not start):
         raise click.ClickException("Provide both --start and --end for a custom range.")
     if batch_size is not None and batch_size < 1:

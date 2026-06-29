@@ -33,6 +33,12 @@ python scripts/run_daily_pipeline.py --sync-railway
 
 Default target day = **yesterday** in the chosen timezone.
 
+> **Analytics views refresh automatically.** Classification and the knowledge-index step both
+> call `ensure_analytics_views`, so every analytics view — including the reason → outcome views
+> `analytics_reason_outcomes` / `analytics_interaction_outcomes` — is rebuilt on each run from
+> the freshly loaded `combined_interactions` + `cxone_transcript_analysis`. No separate step is
+> needed to keep reason → outcome (resolution, escalations, repeat contacts) current.
+
 > **LLM cost / requirements:** Classification and the knowledge index both call OpenAI and
 > need `OPENAI_API_KEY`. If the key is unset they are skipped with a warning. Disable them
 > per run with `--skip-classification` / `--skip-knowledge-index`. Classification covers the
@@ -45,7 +51,8 @@ With `--sync-railway`, after the local load the runner:
 
 1. Syncs the relational tables (`cxone_transcripts`, `zendesk_tickets`, `combined_interactions`) scoped to the target day.
 2. Syncs the freshly classified rows (`cxone_transcript_analysis`, `transcript_reduction_reports`, `transcript_reduction_report_reasons`) scoped by `--since`.
-3. Builds the RAG knowledge index **directly on the Railway DB** (so each day's content is embedded once, on the DB the chatbot reads).
+3. Refreshes all analytics views on Railway (`analytics_interactions`, `analytics_transcript_summaries`, `analytics_reduction_recommendations`, `analytics_reason_outcomes`, `analytics_interaction_outcomes`) — they read the just-synced tables, so reason → outcome answers stay current with no extra step.
+4. Builds the RAG knowledge index **directly on the Railway DB** (so each day's content is embedded once, on the DB the chatbot reads).
 
 ---
 

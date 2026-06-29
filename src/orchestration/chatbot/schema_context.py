@@ -69,6 +69,40 @@ This view is pre-aggregated; do NOT add GROUP BY. Order by rank for top reasons.
 contains only the latest run, so no date filter is needed unless the user asks for history
 (query transcript_reduction_reports / transcript_reduction_report_reasons for older runs).
 
+## Reason -> outcome: analytics_reason_outcomes (use for "is this reason costly / are we fixing it")
+Pre-aggregated outcome rates per call reason — turns "high volume" into "high cost / fixable".
+Grouped by the unified Zendesk call_reason. Use when the user asks which reasons drive repeat
+contacts, escalations, or stay unresolved, or asks about resolution/escalation/callback rates.
+
+Columns (one row per call_reason):
+- call_reason (text) — the reason callers contacted about
+- call_count (bigint) — calls with this reason; distinct_callers (bigint) — unique phone numbers
+- resolved_count (bigint), resolved_pct (numeric) — ticket_status solved/closed
+- unresolved_count (bigint), unresolved_pct (numeric) — ticket_status new/open/pending/hold
+- escalated_count (bigint), escalated_pct (numeric) — high/urgent priority or an "escalat" tag
+- repeat_contact_count (bigint), repeat_contact_pct (numeric) — calls from a phone number seen >1 time
+
+This view is pre-aggregated; do NOT add GROUP BY. Order by call_count (volume), escalated_pct,
+repeat_contact_pct, or unresolved_pct depending on what the user wants to prioritize.
+
+## Per-call outcomes: analytics_interaction_outcomes (use for slicing outcomes by any dimension)
+One row per call segment with its reason joined to its outcome. Use this when the user wants
+outcomes grouped by something other than call_reason (e.g. by transcript primary_reason, skill,
+team, form type, date) or wants the example calls behind an outcome.
+
+Columns:
+- segment_id (text), ticket_id (bigint), interaction_start (timestamptz)
+- call_direction, media_type, skill_name, team_name, agent_name (text)
+- client_sentiment, agent_sentiment (text)
+- contact_no (text) — caller phone/ANI; the key for repeat contacts (NOT contact_id)
+- call_reason (text) — Zendesk reason; primary_reason, secondary_reason, tertiary_reason (text) — transcript reasons
+- ticket_status, ticket_priority (text), ticket_tags (jsonb), ticket_form_name (text)
+- resolution_status (text) — 'resolved' | 'unresolved' | 'unknown'
+- is_resolved (bool), is_open (bool) — booleans for FILTER/aggregation
+- is_escalated (bool) — high/urgent priority OR a ticket tag containing "escalat"
+- is_repeat_contact (bool) — this caller (contact_no) appears more than once in the data
+- contact_interaction_count (int) — total calls by this caller; prior_contacts_30d (int) — calls by the same caller in the trailing 30 days before this one
+
 ## Fallback: combined_interactions
 Same as analytics_interactions but includes full transcript_text (large). Prefer analytics_interactions.
 
@@ -85,6 +119,9 @@ analytics_interactions.ticket_form_name. Query zendesk_ticket_forms directly onl
 - Default to inbound PhoneCall when user asks about "calls" without specifying direction
 - Prefer link_method = 'call_object_to_parent' for ticket-enriched analysis unless user wants all segments
 - For transcript-only LLM reasons (primary/secondary/tertiary), use analytics_transcript_summaries — not call_reason from Zendesk
+- For reason -> outcome questions (resolution, escalations, repeat callers): use analytics_reason_outcomes for per-reason rates, or analytics_interaction_outcomes to slice by other dimensions
+- Resolution = ticket_status solved/closed; unresolved = new/open/pending/hold. Escalation is a heuristic (high/urgent priority OR a ticket tag containing "escalat")
+- Repeat contacts are keyed on contact_no (caller phone), NOT contact_id (contact_id is unique per call and never identifies a repeat customer)
 - Use date ranges on interaction_start (timestamptz). "Last week" = previous Mon-Sun UTC; "yesterday" = prior calendar day UTC
 - Aggregate (COUNT, GROUP BY) for volume questions; LIMIT row samples for examples
 
@@ -172,6 +209,48 @@ FROM analytics_reduction_recommendations
 WHERE primary_reason ILIKE '%order status%'
 ORDER BY rank
 LIMIT 5;
+
+Reasons with the worst outcomes (high volume that escalates or repeats):
+SELECT call_reason, call_count, escalated_pct, repeat_contact_pct, unresolved_pct
+FROM analytics_reason_outcomes
+ORDER BY call_count DESC
+LIMIT 20;
+
+Reasons most likely to escalate (min volume to be meaningful):
+SELECT call_reason, call_count, escalated_count, escalated_pct
+FROM analytics_reason_outcomes
+WHERE call_count >= 20
+ORDER BY escalated_pct DESC
+LIMIT 15;
+
+Reasons that generate the most repeat callers:
+SELECT call_reason, call_count, repeat_contact_count, repeat_contact_pct
+FROM analytics_reason_outcomes
+WHERE call_count >= 20
+ORDER BY repeat_contact_pct DESC
+LIMIT 15;
+
+Resolution rate by transcript primary reason last 30 days (inbound):
+SELECT primary_reason,
+       COUNT(*) AS call_count,
+       COUNT(*) FILTER (WHERE is_resolved) AS resolved,
+       ROUND(100.0 * COUNT(*) FILTER (WHERE is_resolved) / COUNT(*), 1) AS resolved_pct
+FROM analytics_interaction_outcomes
+WHERE interaction_start >= NOW() - INTERVAL '30 days'
+  AND upper(replace(call_direction, '-', '_')) LIKE '%IN_BOUND%'
+  AND primary_reason IS NOT NULL
+GROUP BY primary_reason
+ORDER BY call_count DESC
+LIMIT 20;
+
+Example repeat-contact calls for a reason (drill-down):
+SELECT segment_id, interaction_start, contact_no, contact_interaction_count,
+       prior_contacts_30d, ticket_status, resolution_status
+FROM analytics_interaction_outcomes
+WHERE call_reason ILIKE '%order status%'
+  AND is_repeat_contact
+ORDER BY contact_interaction_count DESC, interaction_start DESC
+LIMIT 20;
 """.strip()
 
 

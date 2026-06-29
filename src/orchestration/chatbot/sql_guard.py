@@ -43,6 +43,8 @@ ALLOWED_RELATIONS = frozenset(
         "analytics_interactions",
         "analytics_transcript_summaries",
         "analytics_reduction_recommendations",
+        "analytics_interaction_outcomes",
+        "analytics_reason_outcomes",
         "combined_interactions",
         "cxone_transcript_analysis",
         "cxone_transcripts",

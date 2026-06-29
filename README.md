@@ -708,6 +708,26 @@ python scripts/sync_to_railway.py --tables cxone_transcripts,cxone_transcript_an
 
 (`sync_to_railway.py` also refreshes analytics views on the target DB.)
 
+### Reason → outcome linkage (`analytics_reason_outcomes` / `analytics_interaction_outcomes`)
+
+Two views connect **why** customers contacted to **what happened**, so "high volume" becomes "high cost / fixable":
+
+- **`analytics_reason_outcomes`** — pre-aggregated per Zendesk `call_reason`: `call_count`, `distinct_callers`, and resolved / unresolved / escalated / repeat-contact counts and percentages. One query ranks reasons by escalation rate, repeat-caller rate, or unresolved rate.
+- **`analytics_interaction_outcomes`** — one row per call segment joining the reason (`call_reason` + transcript `primary/secondary/tertiary_reason`) to its outcome columns: `resolution_status` (`resolved`/`unresolved`/`unknown`), `is_resolved`, `is_open`, `is_escalated`, `is_repeat_contact`, `contact_interaction_count`, `prior_contacts_30d`. Group it by `primary_reason`, `skill_name`, `ticket_form_name`, date, etc. to slice outcomes any way.
+
+Definitions: **resolution** = `ticket_status` solved/closed; **escalation** = high/urgent priority **or** a ticket tag containing "escalat" (a tunable heuristic); **repeat contact** = the same caller phone `contact_no` appears more than once (note: `contact_id` is unique per call and does *not* identify a repeat customer).
+
+Both views are derived entirely from already-synced tables (`combined_interactions` + `cxone_transcript_analysis`) and are (re)created by `ensure_analytics_views` — which runs inside the daily pipeline and `sync_to_railway.py` — so **no extra extract or sync step is required**; a normal sync keeps them current. They are also allow-listed in the chatbot SQL guard and documented in its schema prompt.
+
+```sql
+-- Reasons that escalate or generate repeat callers the most (min volume 20)
+SELECT call_reason, call_count, escalated_pct, repeat_contact_pct, unresolved_pct
+FROM analytics_reason_outcomes
+WHERE call_count >= 20
+ORDER BY repeat_contact_pct DESC
+LIMIT 15;
+```
+
 ### Verify sync parity (`check_sync_parity.py`)
 
 Before trusting the hosted chatbot's answers, confirm the data actually made it to Railway. `scripts/check_sync_parity.py` compares the **source** DB (local `DATABASE_URL`) against the **target** DB (`TARGET_DATABASE_URL`, the public Railway URL) for each table and reports whether **row counts and dates line up**:

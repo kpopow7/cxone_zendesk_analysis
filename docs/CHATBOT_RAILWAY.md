@@ -32,7 +32,7 @@ Complete these on your PC first:
 - [ ] Local pipeline runs and loads data into Docker Postgres (`DATABASE_URL=localhost:5433`)
 - [ ] `TARGET_DATABASE_URL` in `.env` uses the **public** Postgres URL (not `postgres.railway.internal`)
 - [ ] `python scripts/sync_to_railway.py` completes successfully
-- [ ] Analytics views exist on Railway (`analytics_interactions`, `analytics_transcript_summaries` if using Step 4b, `analytics_reduction_recommendations` for ranked reasons + fixes)
+- [ ] Analytics views exist on Railway (`analytics_interactions`, `analytics_transcript_summaries` if using Step 4b, `analytics_reduction_recommendations` for ranked reasons + fixes, and `analytics_reason_outcomes` / `analytics_interaction_outcomes` for reason → outcome linkage). `sync_to_railway.py` creates/refreshes all of these automatically.
 - [ ] Knowledge index built for RAG **on the Railway DB** (`python scripts/build_knowledge_index.py --target-url $env:TARGET_DATABASE_URL` — the `analytics_knowledge_chunks` table is not synced, so build it directly on Railway; see [docs/RAG.md](../docs/RAG.md))
 - [ ] This repo is pushed to GitHub (Railway deploys from GitHub)
 
@@ -64,9 +64,11 @@ python scripts/sync_to_railway.py
 
 ### Create the analytics view (required for the chatbot)
 
-The chatbot queries **`analytics_interactions`** (Zendesk-linked calls), optionally **`analytics_transcript_summaries`** (per-call LLM transcript reasons from Step 4b), and **`analytics_reduction_recommendations`** (latest ranked reasons + recommended fixes from `run_transcript_summary.py --full-report`). `sync_to_railway.py` creates/refreshes these views on the target DB; you can also run `scripts/railway_analytics_setup.sql` manually.
+The chatbot queries **`analytics_interactions`** (Zendesk-linked calls), optionally **`analytics_transcript_summaries`** (per-call LLM transcript reasons from Step 4b), **`analytics_reduction_recommendations`** (latest ranked reasons + recommended fixes from `run_transcript_summary.py --full-report`), and the **reason → outcome** views **`analytics_reason_outcomes`** / **`analytics_interaction_outcomes`**. `sync_to_railway.py` creates/refreshes all of these views on the target DB; you can also run `scripts/railway_analytics_setup.sql` manually.
 
 > `analytics_reduction_recommendations` surfaces the **reduction report** (ranked reasons WITH recommendations) so the chatbot can answer "what's driving contacts and what should we do?". It reads the latest run from `transcript_reduction_reports` / `transcript_reduction_report_reasons`, which `sync_to_railway.py` now copies by default.
+
+> `analytics_reason_outcomes` / `analytics_interaction_outcomes` link each reason to its **outcome** — resolution (`ticket_status`), escalations (high/urgent priority or an "escalat" tag), and repeat contacts (same caller phone `contact_no` seen more than once) — so the chatbot can turn "high volume" into "high cost / fixable". These views are derived purely from already-synced tables (`combined_interactions` + `cxone_transcript_analysis`), so **no extra sync step is needed** — just re-run `sync_to_railway.py` as usual.
 
 See **[Running `railway_analytics_setup.sql` on Railway](#running-railway_analytics_setupsql-on-railway)** below for full steps.
 
@@ -82,7 +84,7 @@ Re-run `sync_to_railway.py` after daily pipeline jobs.
 
 ## Running `railway_analytics_setup.sql` on Railway
 
-This script creates (or updates) `analytics_interactions`, `analytics_transcript_summaries`, and `analytics_reduction_recommendations` (plus the `transcript_reduction_reports` / `transcript_reduction_report_reasons` tables it reads). The chatbot and example SQL depend on them.
+This script creates (or updates) `analytics_interactions`, `analytics_transcript_summaries`, `analytics_reduction_recommendations`, and the reason → outcome views `analytics_interaction_outcomes` / `analytics_reason_outcomes` (plus the `transcript_reduction_reports` / `transcript_reduction_report_reasons` tables it reads). The chatbot and example SQL depend on them.
 
 **Prerequisites**
 
@@ -99,7 +101,7 @@ This script creates (or updates) `analytics_interactions`, `analytics_transcript
 
 **What to run**
 
-Only the active SQL block (lines 4–33 in the file). The rest is commented optional setup for a read-only `chatbot_reader` user.
+Run the entire file — every active statement down to (but not including) the commented `CREATE USER` / `GRANT` block at the bottom, which is optional setup for a read-only `chatbot_reader` user. Pasting the whole file is fine; Postgres ignores the `--` comment lines.
 
 ---
 
@@ -128,6 +130,12 @@ SELECT COUNT(*) FROM analytics_interactions;
 SELECT call_reason, disposition_label
 FROM analytics_interactions
 WHERE call_reason IS NOT NULL OR disposition_label IS NOT NULL
+LIMIT 5;
+
+-- Reason -> outcome views exist (P0): rates per reason
+SELECT call_reason, call_count, escalated_pct, repeat_contact_pct, unresolved_pct
+FROM analytics_reason_outcomes
+ORDER BY call_count DESC
 LIMIT 5;
 ```
 

@@ -394,13 +394,29 @@ class ChatbotAgent:
             f"Query returned {result.row_count} row(s)"
             f"{' (truncated)' if result.truncated else ''}.\n\n"
             f"Results JSON:\n{data_preview}\n\n"
-            "Write a clear, concise summary for a contact-center manager. "
-            "Use bullet points for rankings. Include counts and percentages where useful. "
-            "Do not invent data not present in the results. "
+            "Answer as a contact-center analyst. NEVER reply with bare numbers — always turn "
+            "the data into insight. Structure your answer:\n"
+            "1) **Answer** — the headline number(s) or ranking that directly answers the "
+            "question (use bullet points for rankings; include counts and percentages).\n"
+            "2) **What stands out** — interpret the numbers: the biggest driver, a notable "
+            "concentration (e.g. 'top 3 reasons = X% of volume'), an outlier, or a "
+            "change/comparison if the data contains one. Ground every statement strictly in "
+            "the returned rows.\n"
+            "3) **Takeaway** — one short, actionable next step or recommendation the manager "
+            "could act on, OR a sharper follow-up question they could ask next. If the data is "
+            "about call reasons or outcomes, point them to the deeper views when relevant "
+            "(e.g. analytics_reduction_recommendations for recommended fixes, or "
+            "analytics_reason_outcomes for which reasons escalate / repeat / go unresolved).\n\n"
+            "Rules: Do not invent data not present in the results — interpretation and "
+            "recommendations must follow from the numbers shown. Keep it concise and skimmable. "
             "If dispositions or reasons look like codes, describe them plainly."
         )
         return self._chat_completion(
-            system="You summarize contact center analytics for business users.",
+            system=(
+                "You are a contact-center analytics partner for business users. You always "
+                "explain what the numbers mean and what to do about them — never just restate "
+                "figures."
+            ),
             user=prompt,
         )
 
@@ -512,7 +528,12 @@ def _format_count_answer(question: str, result: QueryResult) -> str:
         row = result.rows[0]
         if len(row) == 1:
             value = next(iter(row.values()))
-            return f"The query returned **{value}**."
+            return (
+                f"The answer is **{value}**.\n\n"
+                "To turn this into insight, ask a follow-up such as how it breaks down by "
+                "reason, skill, or ticket form type, how it compares to the prior period, or "
+                "which reasons drive escalations and repeat contacts (analytics_reason_outcomes)."
+            )
     return (
         f"The query returned {result.row_count} row(s), but summarization produced an empty "
         "response. Try again or rephrase your question."

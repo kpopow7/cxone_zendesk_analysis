@@ -60,3 +60,30 @@ def test_allows_analytics_reduction_recommendations() -> None:
     """
     result = validate_sql(sql)
     assert result.ok, result.error
+
+
+def test_allows_analytics_reason_outcomes() -> None:
+    sql = """
+    SELECT call_reason, call_count, escalated_pct, repeat_contact_pct, unresolved_pct
+    FROM analytics_reason_outcomes
+    ORDER BY call_count DESC
+    LIMIT 20
+    """
+    result = validate_sql(sql)
+    assert result.ok, result.error
+
+
+def test_allows_analytics_interaction_outcomes() -> None:
+    sql = """
+    SELECT primary_reason,
+           COUNT(*) AS call_count,
+           COUNT(*) FILTER (WHERE is_resolved) AS resolved
+    FROM analytics_interaction_outcomes
+    WHERE interaction_start >= NOW() - INTERVAL '30 days'
+      AND is_repeat_contact
+    GROUP BY primary_reason
+    ORDER BY call_count DESC
+    LIMIT 20
+    """
+    result = validate_sql(sql)
+    assert result.ok, result.error
