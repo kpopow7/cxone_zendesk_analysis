@@ -27,6 +27,7 @@ from orchestration.steps.daily_pipeline import (  # noqa: E402
     railway_sync_tables,
     run_daily_knowledge_index,
     run_daily_pipeline,
+    run_daily_reason_taxonomy,
 )
 
 
@@ -59,6 +60,11 @@ from orchestration.steps.daily_pipeline import (  # noqa: E402
     help="Skip transcript classification + reduction report (default: run; needs OPENAI_API_KEY).",
 )
 @click.option(
+    "--skip-reason-taxonomy",
+    is_flag=True,
+    help="Skip refreshing the canonical reason taxonomy map (default: run; no LLM needed).",
+)
+@click.option(
     "--skip-knowledge-index",
     is_flag=True,
     help="Skip rebuilding the chatbot RAG knowledge index (default: run; needs OPENAI_API_KEY).",
@@ -77,6 +83,7 @@ def main(
     skip_zendesk: bool,
     skip_combined: bool,
     skip_classification: bool,
+    skip_reason_taxonomy: bool,
     skip_knowledge_index: bool,
     dry_run: bool,
     sync_railway: bool,
@@ -103,6 +110,7 @@ def main(
         skip_zendesk=skip_zendesk,
         skip_combined=skip_combined,
         skip_classification=skip_classification,
+        skip_reason_taxonomy=skip_reason_taxonomy,
         skip_knowledge_index=skip_knowledge_index or build_index_on_target,
         dry_run=dry_run,
     )
@@ -140,6 +148,12 @@ def main(
                 f"  Reduction report #{result.classification.report_id} -> "
                 "analytics_reduction_recommendations"
             )
+    if result.reason_taxonomy:
+        tax = result.reason_taxonomy
+        click.echo(
+            f"Reason taxonomy: {tax.distinct_reasons} distinct reasons, "
+            f"{tax.mapped_reasons} mapped, {tax.fallback_reasons} uncategorized"
+        )
     if result.knowledge_index:
         idx = result.knowledge_index
         click.echo(
@@ -182,6 +196,20 @@ def _sync_to_railway(result, *, settings, build_index_on_target: bool) -> None:
         click.echo(f"Syncing classification tables to Railway ({', '.join(class_tables)})...")
         _run_sync(railway_classification_sync_args(result.window, class_tables))
         click.echo("Classification sync completed.")
+
+    # Rebuild the canonical reason map directly on Railway from the just-synced rows + config,
+    # so the chatbot's canonical columns/views are correct (no extra table sync needed).
+    if "reason_taxonomy" not in result.skipped_steps:
+        target_url = os.environ.get("TARGET_DATABASE_URL")
+        if target_url:
+            click.echo("Refreshing reason taxonomy on Railway...")
+            tax = run_daily_reason_taxonomy(
+                settings, database_url=normalize_database_url(target_url)
+            )
+            click.echo(
+                f"Railway reason taxonomy: {tax.distinct_reasons} distinct, "
+                f"{tax.mapped_reasons} mapped, {tax.fallback_reasons} uncategorized"
+            )
 
     if build_index_on_target:
         target_url = os.environ.get("TARGET_DATABASE_URL")

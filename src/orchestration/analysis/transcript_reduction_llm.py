@@ -52,9 +52,10 @@ def generate_primary_reason_reductions(
 
     prompt = (
         "You are a contact-center operations analyst. "
-        "Calls were classified from transcripts only (no ticket form data).\n\n"
-        f"Primary call reason: {primary_reason}\n"
-        f"Volume: {count} calls ({share_pct}% of analyzed transcript volume)\n\n"
+        "Interactions (calls, chats, emails) were classified from transcripts only "
+        "(no ticket form data).\n\n"
+        f"Primary contact reason: {primary_reason}\n"
+        f"Volume: {count} interactions ({share_pct}% of analyzed transcript volume)\n\n"
         "Secondary reason breakdown:\n"
         + ("\n".join(secondary_lines) if secondary_lines else "  (none)")
         + "\n\n"

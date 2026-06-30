@@ -17,9 +17,11 @@ FORM_TYPES_QUERY = (
     "SELECT DISTINCT ticket_form_name FROM analytics_interactions "
     "WHERE ticket_form_name IS NOT NULL ORDER BY ticket_form_name"
 )
+from orchestration.analysis.reason_taxonomy import ReasonTaxonomy, load_reason_taxonomy
 from orchestration.db.session import get_engine
+from orchestration.rag.filters import RetrievalFilters, extract_retrieval_filters
 from orchestration.rag.retrieve import RetrievedChunk, format_chunks_for_llm, retrieve_knowledge_chunks
-from orchestration.rag.router import route_question
+from orchestration.rag.router import detect_intents, route_question
 
 
 def _is_retryable_openai_error(exc: BaseException) -> bool:
@@ -63,10 +65,55 @@ class ChatbotResponse:
     debug: dict = field(default_factory=dict)
 
 
+SKILLS_QUERY = (
+    "SELECT DISTINCT skill_name FROM analytics_interactions "
+    "WHERE skill_name IS NOT NULL AND skill_name <> '' ORDER BY skill_name"
+)
+
+
 class ChatbotAgent:
     def __init__(self, settings: ChatbotSettings) -> None:
         self._settings = settings
         self._engine = get_engine(settings.database_url)
+        self._known_skills_cache: list[str] | None = None
+        self._taxonomy_cache: ReasonTaxonomy | None = None
+
+    def _known_skills(self) -> list[str]:
+        """Distinct CXone skill names, cached for the agent's lifetime (for filter matching)."""
+        if self._known_skills_cache is not None:
+            return self._known_skills_cache
+        skills: list[str] = []
+        try:
+            result = execute_readonly_query(
+                self._engine,
+                SKILLS_QUERY,
+                max_rows=1000,
+                timeout_seconds=self._settings.chatbot_query_timeout_seconds,
+            )
+            for row in result.rows:
+                value = next(iter(row.values()), None)
+                if value:
+                    skills.append(str(value))
+        except Exception:
+            skills = []
+        self._known_skills_cache = skills
+        return skills
+
+    def _reason_taxonomy(self) -> ReasonTaxonomy:
+        if self._taxonomy_cache is None:
+            self._taxonomy_cache = load_reason_taxonomy("config/reason_taxonomy.json")
+        return self._taxonomy_cache
+
+    def _retrieval_filters(self, question: str) -> RetrievalFilters | None:
+        """Extract skill / reason / date filters from the question for metadata-filtered RAG."""
+        if not self._settings.chatbot_rag_filters_enabled:
+            return None
+        filters = extract_retrieval_filters(
+            question,
+            known_skills=self._known_skills(),
+            taxonomy=self._reason_taxonomy(),
+        )
+        return filters if filters.has_any else None
 
     def available_form_types(self) -> list[str]:
         """Distinct Zendesk ticket form names present in the data (for UI pickers).
@@ -138,6 +185,11 @@ class ChatbotAgent:
 
         rag_chunks: list[RetrievedChunk] = []
         if mode in ("rag", "hybrid") and self._settings.openai_api_key:
+            # Restrict retrieval to the skill / reason / date the user asked about (when present),
+            # so example calls come from the right slice instead of relying on embedding luck.
+            retrieval_filters = self._retrieval_filters(
+                memory.contextual_query(question) if memory.has_context() else question
+            )
             try:
                 rag_chunks = retrieve_knowledge_chunks(
                     self._engine,
@@ -149,6 +201,7 @@ class ChatbotAgent:
                     min_similarity=self._settings.chatbot_rag_min_similarity,
                     timeout_seconds=self._settings.request_timeout_seconds,
                     embed_query=memory.contextual_query(question) if memory.has_context() else None,
+                    filters=retrieval_filters,
                 )
             except Exception as exc:
                 if mode == "rag":
@@ -330,11 +383,15 @@ class ChatbotAgent:
         *,
         form_types: list[str] | None = None,
     ) -> tuple[str | None, str | None]:
+        intent_question = (
+            memory.contextual_query(question) if memory.has_context() else question
+        )
         prompt = (
             f"{build_schema_prompt()}\n\n"
             f"Conversation so far:\n{memory.as_prompt_context()}\n\n"
             f"User question: {question}"
-            f"{_form_filter_instruction(form_types)}\n\n"
+            f"{_form_filter_instruction(form_types)}"
+            f"{_intent_instruction(intent_question)}\n\n"
             "If the question is a follow-up, resolve it using the conversation so far "
             "(e.g. reuse the previously discussed time range, skill, or filters). "
             "Return ONLY a JSON object: "
@@ -515,6 +572,50 @@ def _form_filter_instruction(form_types: list[str] | None) -> str:
         f"`ticket_form_name IN ({quoted})` in its WHERE clause so only those form types are "
         "counted, grouped, or sampled. Use ticket_form_name when grouping by form type."
     )
+
+
+_TREND_COMPARE_GUIDANCE = (
+    "\n\nTREND / COMPARISON INTENT (first-class): The user wants a period-over-period change, "
+    "not a single number. Write ONE query that returns BOTH periods so the delta is explicit. "
+    "Define the prior period as the equal-length window immediately before the current one "
+    "(e.g. 'vs last week' = the 7 days before the week asked about; 'this week vs last week' = "
+    "current calendar week vs the previous one). Use conditional aggregation, for example:\n"
+    "WITH compare AS (\n"
+    "  SELECT\n"
+    "    COUNT(*) FILTER (WHERE interaction_start >= NOW() - INTERVAL '7 days') AS current_count,\n"
+    "    COUNT(*) FILTER (WHERE interaction_start >= NOW() - INTERVAL '14 days'\n"
+    "                       AND interaction_start < NOW() - INTERVAL '7 days') AS prior_count\n"
+    "  FROM analytics_interactions\n"
+    "  WHERE upper(replace(call_direction, '-', '_')) LIKE '%IN_BOUND%'\n"
+    ")\n"
+    "SELECT current_count, prior_count, current_count - prior_count AS change,\n"
+    "       ROUND(100.0 * (current_count - prior_count) / NULLIF(prior_count, 0), 1) AS pct_change\n"
+    "FROM compare;\n"
+    "When comparing by a dimension (reason, skill, form type), GROUP BY that dimension and emit "
+    "current_count, prior_count, change, and pct_change per group; ORDER BY change (or pct_change) "
+    "so the biggest movers are first. Keep both windows in the same query."
+)
+
+_DRILLDOWN_GUIDANCE = (
+    "\n\nDRILL-DOWN INTENT (first-class): The user wants the actual calls/tickets behind a number, "
+    "not an aggregate. Return INDIVIDUAL rows (no GROUP BY) with identifying detail so they can "
+    "inspect them: segment_id, interaction_start, skill_name, the relevant reason column "
+    "(call_reason / primary_reason or its *_canonical), ticket_status, and a short text column "
+    "(transcript_summary from analytics_transcript_summaries, or segment_summary). Apply the SAME "
+    "filters the user referenced (time range, skill, reason, form type), ORDER BY interaction_start "
+    "DESC, and LIMIT to a readable sample (25 unless they ask for more)."
+)
+
+
+def _intent_instruction(question: str) -> str:
+    """Append vetted SQL guidance for detected trend-compare / drill-down intents."""
+    intents = detect_intents(question)
+    parts: list[str] = []
+    if "trend_compare" in intents:
+        parts.append(_TREND_COMPARE_GUIDANCE)
+    if "drilldown" in intents:
+        parts.append(_DRILLDOWN_GUIDANCE)
+    return "".join(parts)
 
 
 def _format_agent_error(exc: Exception) -> str:

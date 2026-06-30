@@ -648,6 +648,7 @@ def _classify_and_commit_incremental(
                 base_url=settings.openai_base_url,
                 timeout_seconds=settings.request_timeout_seconds,
                 max_transcript_chars=config.classification.max_transcript_chars,
+                media_type=row.media_type,
             )
         except Exception as exc:
             classify_errors += 1
@@ -1028,6 +1029,7 @@ def _classify_segments(
                 base_url=settings.openai_base_url,
                 timeout_seconds=settings.request_timeout_seconds,
                 max_transcript_chars=config.classification.max_transcript_chars,
+                media_type=row.media_type,
             )
             return row.segment_id, analysis
         except (TranscriptClassificationError, Exception) as exc:

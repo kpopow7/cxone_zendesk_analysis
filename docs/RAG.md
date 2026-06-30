@@ -32,6 +32,33 @@ Documents are built from:
 
 That narrative text is embedded with OpenAI (`text-embedding-3-small`) and stored in **pgvector** for cosine similarity search.
 
+## Metadata-filtered retrieval
+
+Pure similarity search can surface semantically-similar calls from the wrong skill or month. To
+keep retrieval precise, the chatbot first extracts structured filters from the question and
+**restricts** the candidate rows before ranking by similarity:
+
+| Signal | Detected from | Applied as |
+|--------|---------------|------------|
+| **Date window** | "yesterday", "last week", "last 30 days", "this week", "last month" | `interaction_start` range |
+| **Skill** | any known CXone `skill_name` mentioned | `skill_name ILIKE` |
+| **Canonical reason** | a reason whose taxonomy alias appears (e.g. "remake") | join to `analytics_reason_taxonomy` on the canonical label |
+
+So "remake complaints last week" retrieves remake-canonical calls from the previous calendar week
+— not whatever the embedding happens to match. If the filters are too strict and match nothing,
+retrieval **falls back** to pure similarity so you always get an answer. Set
+`CHATBOT_RAG_FILTERS_ENABLED=false` to disable and use similarity-only retrieval.
+
+## Trend / comparison & drill-down
+
+Two question shapes get a **vetted SQL template** injected into text-to-SQL so the answers are
+reliable rather than ad-hoc:
+
+- **Trend / comparison** ("how did remake calls change vs last week?", "week-over-week") → a single
+  query returning the current and prior equal-length periods plus `change` and `pct_change`.
+- **Drill-down** ("show me the calls behind that number", "which tickets drove the spike") →
+  individual rows (segment_id, time, skill, reason, status, summary), not an aggregate.
+
 ## Pipeline (recommended order)
 
 ```powershell
@@ -115,6 +142,7 @@ LIMIT 5;
 CHATBOT_RAG_ENABLED=true
 CHATBOT_RAG_TOP_K=8
 CHATBOT_RAG_MIN_SIMILARITY=0.30
+CHATBOT_RAG_FILTERS_ENABLED=true
 OPENAI_EMBEDDING_MODEL=text-embedding-3-small
 
 # Conversation memory (follow-up questions build on earlier context)

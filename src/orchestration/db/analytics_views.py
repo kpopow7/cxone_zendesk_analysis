@@ -3,9 +3,13 @@ from __future__ import annotations
 from sqlalchemy.engine import Engine
 from sqlalchemy.sql import text
 
-from orchestration.db.schema import ensure_reduction_report_tables
+from orchestration.analysis.reason_taxonomy import reason_key_sql
+from orchestration.db.schema import (
+    ensure_reason_taxonomy_table,
+    ensure_reduction_report_tables,
+)
 
-ANALYTICS_INTERACTIONS_VIEW = """
+ANALYTICS_INTERACTIONS_VIEW = f"""
 CREATE OR REPLACE VIEW analytics_interactions AS
 SELECT
     ci.segment_id,
@@ -32,6 +36,7 @@ SELECT
     f.name AS ticket_form_name,
     ci.zendesk_promoted_fields,
     ci.call_reason,
+    rt.canonical_reason AS call_reason_canonical,
     ci.call_reason_code,
     ci.call_reason_source,
     ci.disposition_code,
@@ -40,9 +45,11 @@ SELECT
     ci.built_at
 FROM combined_interactions AS ci
 LEFT JOIN zendesk_ticket_forms AS f ON f.form_id = ci.ticket_form_id
+LEFT JOIN analytics_reason_taxonomy AS rt
+    ON rt.reason_key = {reason_key_sql('ci.call_reason')}
 """
 
-ANALYTICS_TRANSCRIPT_SUMMARIES_VIEW = """
+ANALYTICS_TRANSCRIPT_SUMMARIES_VIEW = f"""
 CREATE OR REPLACE VIEW analytics_transcript_summaries AS
 SELECT
     a.segment_id,
@@ -57,6 +64,7 @@ SELECT
     t.agent_sentiment,
     a.transcript_summary,
     a.primary_reason,
+    rt.canonical_reason AS primary_reason_canonical,
     a.secondary_reason,
     a.tertiary_reason,
     a.reduction_hint,
@@ -65,6 +73,8 @@ SELECT
     left(t.transcript_text, 2000) AS transcript_preview
 FROM cxone_transcript_analysis AS a
 JOIN cxone_transcripts AS t ON t.segment_id = a.segment_id
+LEFT JOIN analytics_reason_taxonomy AS rt
+    ON rt.reason_key = {reason_key_sql('a.primary_reason')}
 """
 
 # Surfaces the most recent reduction report run as flat rows so the chatbot can answer
@@ -112,7 +122,7 @@ WHERE rep.report_id = (
 #   so it never identifies the same customer calling again.
 # - is_escalated is a heuristic: high/urgent ticket priority OR a ticket tag containing
 #   "escalat". Tune the tag/priority rules here if the Zendesk workflow differs.
-ANALYTICS_INTERACTION_OUTCOMES_VIEW = """
+ANALYTICS_INTERACTION_OUTCOMES_VIEW = f"""
 CREATE VIEW analytics_interaction_outcomes AS
 WITH base AS (
     SELECT
@@ -166,10 +176,17 @@ SELECT
     base.contact_no,
     base.call_reason,
     base.call_reason_code,
+    crt.canonical_reason AS call_reason_canonical,
     base.disposition_label,
     base.primary_reason,
+    prt.canonical_reason AS primary_reason_canonical,
     base.secondary_reason,
     base.tertiary_reason,
+    CASE
+        WHEN crt.canonical_reason IS NULL OR prt.canonical_reason IS NULL THEN 'unknown'
+        WHEN crt.canonical_reason = prt.canonical_reason THEN 'match'
+        ELSE 'mismatch'
+    END AS reason_match_status,
     base.ticket_status,
     base.ticket_priority,
     base.ticket_tags,
@@ -208,6 +225,10 @@ SELECT
     END AS prior_contacts_30d
 FROM base
 LEFT JOIN zendesk_ticket_forms AS f ON f.form_id = base.ticket_form_id
+LEFT JOIN analytics_reason_taxonomy AS crt
+    ON crt.reason_key = {reason_key_sql('base.call_reason')}
+LEFT JOIN analytics_reason_taxonomy AS prt
+    ON prt.reason_key = {reason_key_sql('base.primary_reason')}
 """
 
 # Pre-aggregated reason -> outcome rates so "which reasons are high cost / fixable?" is a
@@ -236,20 +257,115 @@ WHERE call_reason IS NOT NULL AND call_reason <> ''
 GROUP BY call_reason
 """
 
+# Canonical reason -> outcome rates (P1 taxonomy). Same shape as analytics_reason_outcomes but
+# grouped on the controlled canonical_reason (transcript primary preferred, Zendesk call_reason
+# as fallback) so rankings are not fragmented by free-text phrasing. Prefer this view for "top
+# reasons" / "worst reasons" questions; it is the trustworthy ranking.
+ANALYTICS_CANONICAL_REASON_OUTCOMES_VIEW = """
+CREATE VIEW analytics_canonical_reason_outcomes AS
+WITH labeled AS (
+    SELECT
+        coalesce(primary_reason_canonical, call_reason_canonical) AS canonical_reason,
+        contact_no,
+        is_resolved,
+        is_open,
+        is_escalated,
+        is_repeat_contact
+    FROM analytics_interaction_outcomes
+)
+SELECT
+    canonical_reason,
+    count(*) AS call_count,
+    count(DISTINCT contact_no) FILTER (
+        WHERE contact_no IS NOT NULL AND contact_no <> ''
+    ) AS distinct_callers,
+    count(*) FILTER (WHERE is_resolved) AS resolved_count,
+    round(100.0 * count(*) FILTER (WHERE is_resolved) / nullif(count(*), 0), 1) AS resolved_pct,
+    count(*) FILTER (WHERE is_open) AS unresolved_count,
+    round(100.0 * count(*) FILTER (WHERE is_open) / nullif(count(*), 0), 1) AS unresolved_pct,
+    count(*) FILTER (WHERE is_escalated) AS escalated_count,
+    round(100.0 * count(*) FILTER (WHERE is_escalated) / nullif(count(*), 0), 1) AS escalated_pct,
+    count(*) FILTER (WHERE is_repeat_contact) AS repeat_contact_count,
+    round(
+        100.0 * count(*) FILTER (WHERE is_repeat_contact) / nullif(count(*), 0), 1
+    ) AS repeat_contact_pct
+FROM labeled
+WHERE canonical_reason IS NOT NULL
+GROUP BY canonical_reason
+"""
+
+# Reconciliation (P1): how often the Zendesk form reason and the transcript reason agree once
+# both are mapped to the canonical vocabulary. Only rows where BOTH reasons are present and
+# mappable are comparable; a low agree_pct flags miscategorized tickets or taxonomy gaps.
+ANALYTICS_REASON_RECONCILIATION_VIEW = """
+CREATE VIEW analytics_reason_reconciliation AS
+SELECT
+    call_reason_canonical,
+    count(*) AS comparable_calls,
+    count(*) FILTER (WHERE reason_match_status = 'match') AS agree_count,
+    round(
+        100.0 * count(*) FILTER (WHERE reason_match_status = 'match') / nullif(count(*), 0), 1
+    ) AS agree_pct,
+    count(*) FILTER (WHERE reason_match_status = 'mismatch') AS disagree_count,
+    round(
+        100.0 * count(*) FILTER (WHERE reason_match_status = 'mismatch') / nullif(count(*), 0), 1
+    ) AS disagree_pct
+FROM analytics_interaction_outcomes
+WHERE call_reason_canonical IS NOT NULL
+  AND primary_reason_canonical IS NOT NULL
+GROUP BY call_reason_canonical
+"""
+
+# Tagging-accuracy QA drill-down (P2): the specific interactions where the Zendesk form reason
+# (what the agent tagged) and the transcript-derived reason (what the call was actually about)
+# map to DIFFERENT canonical categories. Where analytics_reason_reconciliation gives the rate,
+# this lists the individual tickets to review, so a QA analyst can validate / re-tag them.
+ANALYTICS_REASON_MISMATCHES_VIEW = """
+CREATE VIEW analytics_reason_mismatches AS
+SELECT
+    segment_id,
+    ticket_id,
+    interaction_start,
+    media_type,
+    skill_name,
+    team_name,
+    agent_name,
+    ticket_form_name,
+    call_reason,
+    call_reason_canonical AS tagged_reason_canonical,
+    primary_reason,
+    primary_reason_canonical AS transcript_reason_canonical,
+    ticket_status,
+    resolution_status,
+    is_escalated,
+    is_repeat_contact
+FROM analytics_interaction_outcomes
+WHERE reason_match_status = 'mismatch'
+"""
+
 
 def ensure_analytics_views(engine: Engine) -> None:
     """Create or refresh analytics views used by the chatbot and reporting."""
     # The reduction recommendations view reads these tables; make sure they exist first.
     ensure_reduction_report_tables(engine)
+    # Views LEFT JOIN the reason taxonomy map; it must exist (even if empty) before they build.
+    ensure_reason_taxonomy_table(engine)
     with engine.begin() as connection:
         # Postgres CREATE OR REPLACE cannot insert columns mid-view; drop first.
         connection.execute(text("DROP VIEW IF EXISTS analytics_interactions CASCADE"))
         connection.execute(text(ANALYTICS_INTERACTIONS_VIEW))
+        connection.execute(text("DROP VIEW IF EXISTS analytics_transcript_summaries CASCADE"))
         connection.execute(text(ANALYTICS_TRANSCRIPT_SUMMARIES_VIEW))
         connection.execute(text("DROP VIEW IF EXISTS analytics_reduction_recommendations CASCADE"))
         connection.execute(text(ANALYTICS_REDUCTION_RECOMMENDATIONS_VIEW))
-        # reason -> outcome: drop the aggregate first (it depends on the per-segment view).
+        # reason -> outcome: drop the aggregates first (they depend on the per-segment view).
         connection.execute(text("DROP VIEW IF EXISTS analytics_reason_outcomes CASCADE"))
+        connection.execute(text("DROP VIEW IF EXISTS analytics_canonical_reason_outcomes CASCADE"))
+        connection.execute(text("DROP VIEW IF EXISTS analytics_reason_reconciliation CASCADE"))
+        connection.execute(text("DROP VIEW IF EXISTS analytics_reason_mismatches CASCADE"))
         connection.execute(text("DROP VIEW IF EXISTS analytics_interaction_outcomes CASCADE"))
         connection.execute(text(ANALYTICS_INTERACTION_OUTCOMES_VIEW))
         connection.execute(text(ANALYTICS_REASON_OUTCOMES_VIEW))
+        connection.execute(text(ANALYTICS_CANONICAL_REASON_OUTCOMES_VIEW))
+        connection.execute(text(ANALYTICS_REASON_RECONCILIATION_VIEW))
+        connection.execute(text(ANALYTICS_REASON_MISMATCHES_VIEW))

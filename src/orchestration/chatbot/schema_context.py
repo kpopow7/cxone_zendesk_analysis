@@ -10,7 +10,7 @@ Columns:
 - segment_id (text, PK) — unique call segment
 - interaction_start, interaction_end (timestamptz) — filter dates on interaction_start
 - call_direction (text) — e.g. IN_BOUND, OUT_BOUND
-- media_type (text) — e.g. PhoneCall
+- media_type (text) — channel, e.g. PhoneCall, Email, Chat (most rows are PhoneCall)
 - skill_name, team_name, agent_name (text)
 - client_sentiment, agent_sentiment (text)
 - segment_summary (text) — CXone auto-summary
@@ -21,7 +21,8 @@ Columns:
 - ticket_tags (jsonb array)
 - ticket_form_id (bigint) — numeric Zendesk ticket form id
 - ticket_form_name (text) — human ticket form type, e.g. "Assist (Internal)"; use this to group/filter by form type
-- call_reason (text) — unified reason across all Zendesk forms (human-readable)
+- call_reason (text) — unified reason across all Zendesk forms (human-readable, free text)
+- call_reason_canonical (text) — controlled taxonomy label for call_reason (e.g. "Order status"). Prefer this for grouping/ranking reasons so phrasing variants are consolidated
 - call_reason_code (text) — raw Zendesk reason value
 - call_reason_source (text) — source field, e.g. cf_reason_for_contact_consumer
 - disposition_label (text) — unified disposition label across all forms
@@ -39,7 +40,8 @@ Columns:
 - call_direction, media_type, skill_name, team_name, agent_name (text)
 - client_sentiment, agent_sentiment (text)
 - transcript_summary (text) — LLM summary of the call
-- primary_reason, secondary_reason, tertiary_reason (text) — hierarchical call reasons from transcript
+- primary_reason, secondary_reason, tertiary_reason (text) — hierarchical call reasons from transcript (free text)
+- primary_reason_canonical (text) — controlled taxonomy label for primary_reason. Prefer this for grouping/ranking transcript reasons
 - reduction_hint (text) — one-line suggestion to reduce similar contacts
 - analysis_model (text), analyzed_at (timestamptz)
 - transcript_preview (text) — first ~2000 chars of transcript
@@ -96,12 +98,49 @@ Columns:
 - client_sentiment, agent_sentiment (text)
 - contact_no (text) — caller phone/ANI; the key for repeat contacts (NOT contact_id)
 - call_reason (text) — Zendesk reason; primary_reason, secondary_reason, tertiary_reason (text) — transcript reasons
+- call_reason_canonical (text) — taxonomy label for the Zendesk reason; primary_reason_canonical (text) — taxonomy label for the transcript reason
+- reason_match_status (text) — 'match' | 'mismatch' | 'unknown' (do the Zendesk and transcript canonical reasons agree)
 - ticket_status, ticket_priority (text), ticket_tags (jsonb), ticket_form_name (text)
 - resolution_status (text) — 'resolved' | 'unresolved' | 'unknown'
 - is_resolved (bool), is_open (bool) — booleans for FILTER/aggregation
 - is_escalated (bool) — high/urgent priority OR a ticket tag containing "escalat"
 - is_repeat_contact (bool) — this caller (contact_no) appears more than once in the data
 - contact_interaction_count (int) — total calls by this caller; prior_contacts_30d (int) — calls by the same caller in the trailing 30 days before this one
+
+## Canonical reason -> outcome: analytics_canonical_reason_outcomes (PREFER for "top reasons" rankings)
+Same outcome rates as analytics_reason_outcomes but grouped on the CONTROLLED canonical_reason
+(taxonomy label), so free-text phrasing variants are consolidated into trustworthy categories.
+Use this for "what are the top reasons", "biggest reasons", "worst reasons" — it does not split
+"order status" / "order status check" / "where is my order" into separate rows.
+
+Columns (one row per canonical_reason): canonical_reason (text), call_count, distinct_callers,
+resolved_count/resolved_pct, unresolved_count/unresolved_pct, escalated_count/escalated_pct,
+repeat_contact_count/repeat_contact_pct. Pre-aggregated; do NOT add GROUP BY. Order by call_count
+(volume) or a *_pct column to prioritize.
+
+## Reason reconciliation: analytics_reason_reconciliation (use for "do agent tags match the calls")
+How often the Zendesk form reason and the transcript-derived reason agree once both are mapped to
+the canonical vocabulary. Surfaces miscategorized tickets / tagging-accuracy issues.
+Columns (one row per call_reason_canonical): call_reason_canonical (text), comparable_calls,
+agree_count, agree_pct, disagree_count, disagree_pct. Pre-aggregated; do NOT add GROUP BY.
+Order by disagree_pct DESC (with a comparable_calls floor) to find the worst-tagged reasons.
+
+## Tagging-accuracy drill-down: analytics_reason_mismatches (use for "which specific tickets are mis-tagged")
+The individual interactions where the agent-tagged Zendesk reason and the transcript-derived reason
+map to DIFFERENT canonical categories — the concrete tickets behind analytics_reason_reconciliation's
+disagree counts, for a QA analyst to review/re-tag. One row per mismatched segment.
+Columns: segment_id (text), ticket_id (bigint), interaction_start (timestamptz), media_type,
+skill_name, team_name, agent_name, ticket_form_name (text), call_reason (text, raw tagged reason),
+tagged_reason_canonical (text, what the agent tagged), primary_reason (text, raw transcript reason),
+transcript_reason_canonical (text, what the call was about), ticket_status, resolution_status (text),
+is_escalated (bool), is_repeat_contact (bool). Note: a row where tagged_reason_canonical or
+transcript_reason_canonical is 'Other / Uncategorized' usually reflects a taxonomy gap rather than a
+true agent mis-tag; exclude those (both sides <> 'Other / Uncategorized') for confident mis-tags.
+
+## Reason taxonomy: analytics_reason_taxonomy (lookup)
+The controlled vocabulary map. Columns: reason_key (text, normalized free text), reason_display
+(text), canonical_reason (text), sources (text), call_count (bigint). Query directly only to list
+canonical categories or inspect how a raw reason maps; otherwise use the *_canonical columns above.
 
 ## Fallback: combined_interactions
 Same as analytics_interactions but includes full transcript_text (large). Prefer analytics_interactions.
@@ -114,9 +153,12 @@ analytics_interactions.ticket_form_name. Query zendesk_ticket_forms directly onl
 ## Business rules
 - To group or filter tickets by "form type" (e.g. "Assist (Internal)"), use ticket_form_name on analytics_interactions
 - For call reasons: use call_reason (not individual cf_reason_* JSON keys)
+- For ranking/"top reasons" questions, PREFER the canonical columns (call_reason_canonical / primary_reason_canonical) or analytics_canonical_reason_outcomes so phrasing variants are consolidated; use raw call_reason / primary_reason only when the user wants the exact free-text wording
+- For "do agent tags match the call" or tagging-accuracy questions, use analytics_reason_reconciliation for the rates; use analytics_reason_mismatches to list the specific mis-tagged tickets (exclude 'Other / Uncategorized' on both sides for confident mis-tags)
 - For dispositions: use disposition_label (not individual cf_disposition_* JSON keys)
 - Inbound calls: upper(replace(call_direction, '-', '_')) LIKE '%IN_BOUND%'
-- Default to inbound PhoneCall when user asks about "calls" without specifying direction
+- media_type identifies the channel (e.g. PhoneCall, Email, Chat). Most data is PhoneCall; filter media_type = 'PhoneCall' only when the user specifically asks about phone calls, or filter to Email/Chat when they ask about those channels. When the user asks about "contacts"/"interactions" generally, do not restrict media_type
+- Default to inbound PhoneCall when the user asks about "calls" without specifying a channel or direction
 - Prefer link_method = 'call_object_to_parent' for ticket-enriched analysis unless user wants all segments
 - For transcript-only LLM reasons (primary/secondary/tertiary), use analytics_transcript_summaries — not call_reason from Zendesk
 - For reason -> outcome questions (resolution, escalations, repeat callers): use analytics_reason_outcomes for per-reason rates, or analytics_interaction_outcomes to slice by other dimensions
@@ -243,6 +285,37 @@ GROUP BY primary_reason
 ORDER BY call_count DESC
 LIMIT 20;
 
+Top reasons by canonical category (consolidated — preferred for rankings):
+SELECT canonical_reason, call_count, escalated_pct, repeat_contact_pct, unresolved_pct
+FROM analytics_canonical_reason_outcomes
+ORDER BY call_count DESC
+LIMIT 15;
+
+Reasons where agent tagging disagrees most with the call transcript (min volume):
+SELECT call_reason_canonical, comparable_calls, agree_pct, disagree_pct
+FROM analytics_reason_reconciliation
+WHERE comparable_calls >= 20
+ORDER BY disagree_pct DESC
+LIMIT 15;
+
+Specific mis-tagged tickets to review (confident mismatches, newest first):
+SELECT segment_id, ticket_id, interaction_start, skill_name,
+       tagged_reason_canonical, transcript_reason_canonical, ticket_status
+FROM analytics_reason_mismatches
+WHERE tagged_reason_canonical <> 'Other / Uncategorized'
+  AND transcript_reason_canonical <> 'Other / Uncategorized'
+ORDER BY interaction_start DESC
+LIMIT 25;
+
+Most common mis-tag pairs (what agents tag vs what the call was about):
+SELECT tagged_reason_canonical, transcript_reason_canonical, COUNT(*) AS n
+FROM analytics_reason_mismatches
+WHERE tagged_reason_canonical <> 'Other / Uncategorized'
+  AND transcript_reason_canonical <> 'Other / Uncategorized'
+GROUP BY tagged_reason_canonical, transcript_reason_canonical
+ORDER BY n DESC
+LIMIT 20;
+
 Example repeat-contact calls for a reason (drill-down):
 SELECT segment_id, interaction_start, contact_no, contact_interaction_count,
        prior_contacts_30d, ticket_status, resolution_status
@@ -251,6 +324,49 @@ WHERE call_reason ILIKE '%order status%'
   AND is_repeat_contact
 ORDER BY contact_interaction_count DESC, interaction_start DESC
 LIMIT 20;
+
+Period-over-period comparison — inbound call volume this week vs last week (trend/compare):
+WITH compare AS (
+    SELECT
+        COUNT(*) FILTER (WHERE interaction_start >= NOW() - INTERVAL '7 days') AS current_count,
+        COUNT(*) FILTER (
+            WHERE interaction_start >= NOW() - INTERVAL '14 days'
+              AND interaction_start < NOW() - INTERVAL '7 days'
+        ) AS prior_count
+    FROM analytics_interactions
+    WHERE upper(replace(call_direction, '-', '_')) LIKE '%IN_BOUND%'
+)
+SELECT current_count, prior_count, current_count - prior_count AS change,
+       ROUND(100.0 * (current_count - prior_count) / NULLIF(prior_count, 0), 1) AS pct_change
+FROM compare;
+
+Period-over-period by canonical reason (which reasons grew the most, last 7 days vs prior 7):
+SELECT call_reason_canonical,
+       COUNT(*) FILTER (WHERE interaction_start >= NOW() - INTERVAL '7 days') AS current_count,
+       COUNT(*) FILTER (
+           WHERE interaction_start >= NOW() - INTERVAL '14 days'
+             AND interaction_start < NOW() - INTERVAL '7 days'
+       ) AS prior_count
+FROM analytics_interactions
+WHERE call_reason_canonical IS NOT NULL
+GROUP BY call_reason_canonical
+ORDER BY (
+    COUNT(*) FILTER (WHERE interaction_start >= NOW() - INTERVAL '7 days')
+    - COUNT(*) FILTER (
+        WHERE interaction_start >= NOW() - INTERVAL '14 days'
+          AND interaction_start < NOW() - INTERVAL '7 days'
+    )
+) DESC
+LIMIT 20;
+
+Drill-down — the actual calls behind a reason (individual rows, not an aggregate):
+SELECT segment_id, interaction_start, skill_name, primary_reason, primary_reason_canonical,
+       transcript_summary
+FROM analytics_transcript_summaries
+WHERE primary_reason_canonical = 'Remake / replacement'
+  AND interaction_start >= NOW() - INTERVAL '7 days'
+ORDER BY interaction_start DESC
+LIMIT 25;
 """.strip()
 
 

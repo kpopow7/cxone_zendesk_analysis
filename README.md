@@ -71,6 +71,7 @@ Re-run sync after daily pipeline updates. `sync_to_railway.py` refreshes analyti
 ### Phase D — RAG + chatbot (Railway)
 
 - [ ] On Railway Postgres → Query: `CREATE EXTENSION IF NOT EXISTS vector;`
+- [ ] Build the reason taxonomy map **on Railway DB:** `python scripts/build_reason_taxonomy.py --target-url $env:TARGET_DATABASE_URL` (consolidates free-text reasons into canonical categories)
 - [ ] Build knowledge index **on Railway DB:** `python scripts/build_knowledge_index.py --timeframe last-week --target-url $env:TARGET_DATABASE_URL` (the table is not synced — build it directly on Railway) — see [docs/RAG.md](docs/RAG.md)
 - [ ] Deploy chatbot (Gradio) with `DATABASE_URL` = Railway **private** URL, `OPENAI_API_KEY`, `CHATBOT_*` auth — [docs/CHATBOT_RAILWAY.md](docs/CHATBOT_RAILWAY.md)
 
@@ -113,6 +114,7 @@ Docker maps **host port 5433** → container 5432 so it does not clash with a lo
 docker-compose.yml
 config/
   zendesk_field_map.json.example   # Template for promoted custom fields
+  reason_taxonomy.json.example     # Controlled reason vocabulary (canonical categories + aliases)
 src/orchestration/
   config.py
   models.py
@@ -142,6 +144,7 @@ scripts/
   run_zendesk_forms_extract.py     # Sync Zendesk ticket form names (for grouping/filtering)
   sync_to_railway.py               # Copy tables to Railway Postgres
   check_sync_parity.py             # Verify local vs Railway row counts + dates line up
+  build_reason_taxonomy.py         # Canonical reason map (free-text → controlled vocabulary)
   build_knowledge_index.py         # RAG embeddings (pgvector)
   railway_analytics_setup.sql      # Analytics view for chatbot
   probe_zendesk.py
@@ -728,6 +731,78 @@ ORDER BY repeat_contact_pct DESC
 LIMIT 15;
 ```
 
+### Controlled reason taxonomy (`analytics_reason_taxonomy` + canonical views)
+
+Both the transcript-LLM reasons (`primary_reason`) and the Zendesk reasons (`call_reason`) are free
+text, so "Order status", "order status check", and "Where is my order" rank as three separate
+reasons. A small, human-editable vocabulary in `config/reason_taxonomy.json` maps every reason onto
+a **canonical category** so rankings are trustworthy. The map is deterministic (no LLM) and stored
+in `analytics_reason_taxonomy` (free-text key → canonical label).
+
+```powershell
+copy config\reason_taxonomy.json.example config\reason_taxonomy.json   # edit categories/aliases to fit your data
+python scripts/build_reason_taxonomy.py                                # build/refresh the map (local)
+python scripts/build_reason_taxonomy.py --target-url $env:TARGET_DATABASE_URL   # …or on Railway
+```
+
+This adds `*_canonical` columns to the analytics views and two new chatbot views:
+
+- **`analytics_canonical_reason_outcomes`** — same outcome rates as `analytics_reason_outcomes` but
+  grouped on the canonical reason. **Prefer this for "top/worst reasons" rankings** — phrasing
+  variants are consolidated into one row per category.
+- **`analytics_reason_reconciliation`** — how often the Zendesk form reason and the transcript reason
+  **agree** once both are mapped to the vocabulary. A low `agree_pct` flags miscategorized tickets.
+- **`analytics_reason_mismatches`** — the **specific tickets** behind the disagreements (one row per
+  mismatched interaction), so a QA analyst can review and re-tag them.
+
+```sql
+-- Consolidated top reasons (not fragmented by phrasing)
+SELECT canonical_reason, call_count, escalated_pct, repeat_contact_pct
+FROM analytics_canonical_reason_outcomes ORDER BY call_count DESC LIMIT 15;
+
+-- Reasons where agent tagging disagrees most with the call transcript
+SELECT call_reason_canonical, comparable_calls, agree_pct, disagree_pct
+FROM analytics_reason_reconciliation WHERE comparable_calls >= 20 ORDER BY disagree_pct DESC LIMIT 15;
+
+-- The actual mis-tagged tickets to review (confident mismatches)
+SELECT segment_id, ticket_id, tagged_reason_canonical, transcript_reason_canonical, ticket_status
+FROM analytics_reason_mismatches
+WHERE tagged_reason_canonical <> 'Other / Uncategorized'
+  AND transcript_reason_canonical <> 'Other / Uncategorized'
+ORDER BY interaction_start DESC LIMIT 25;
+```
+
+### Tagging-accuracy QA report (P2)
+
+For a one-shot QA summary of how well agent tags match what calls were actually about, run:
+
+```powershell
+python scripts/run_tagging_qa.py --timeframe all --min-volume 50
+```
+
+It prints overall agreement (and a "confident" figure that excludes taxonomy-fallback rows), the
+worst-tagged reasons, the most common mis-tag pairs (tagged → actually about), and a sample of
+tickets to review. Read-only; no LLM/creds needed. Add `--json-output qa.json` to save the full
+report. Build/refresh the reason taxonomy first (`build_reason_taxonomy.py`) for meaningful labels.
+
+### Multi-channel coverage (P2)
+
+The pipeline is channel-agnostic, but ingestion defaults to phone only. To expand root-cause
+analysis to **email / chat / SMS**:
+
+1. **Ingest** the other channels — set `CXONE_MEDIA_TYPES` in `.env` (e.g. `PhoneCall,Email,Chat`,
+   or leave it empty to ingest every channel), then re-run the CXone extract. (The old
+   `CXONE_PHONE_MEDIA_TYPES` name still works.)
+2. **Classify** them — pass `--media-type Email --media-type Chat` to `run_transcript_summary.py`
+   (or set `media_types` in `config/transcript_summary.json`). The LLM classification prompt is
+   channel-aware and adapts its wording per `media_type` (phone call / email / chat).
+
+The chatbot can already slice any analytics view by `media_type`.
+
+The daily pipeline refreshes the map automatically; re-run `build_reason_taxonomy.py` after editing
+the config. New reasons that match no alias fall through to "Other / Uncategorized" — review them and
+add aliases to capture more volume under named categories.
+
 ### Verify sync parity (`check_sync_parity.py`)
 
 Before trusting the hosted chatbot's answers, confirm the data actually made it to Railway. `scripts/check_sync_parity.py` compares the **source** DB (local `DATABASE_URL`) against the **target** DB (`TARGET_DATABASE_URL`, the public Railway URL) for each table and reports whether **row counts and dates line up**:
@@ -889,3 +964,5 @@ Pass `--target-url` (alias `--database-url`) with the Railway **public** URL to 
 - **Step 4b** — Transcript-only LLM primary/secondary/tertiary reasons on `cxone_transcripts` (done)
 - **Step 5** — LLM transcript recommendations in Step 4 (done); optional full-transcript deep-dive agent (planned)
 - **Step 6** — Hosted analytics chatbot on Railway with company login ([docs/CHATBOT_RAILWAY.md](docs/CHATBOT_RAILWAY.md))
+- **P1 enhancements** — Controlled reason taxonomy + reconciliation (`analytics_canonical_reason_outcomes`, `analytics_reason_reconciliation`), metadata-filtered RAG retrieval (skill / reason / date), and first-class trend-compare + drill-down in the chatbot (done)
+- **P2 enhancements** — Channel-agnostic ingest + channel-aware transcript classification (phone / email / chat via `CXONE_MEDIA_TYPES` + `--media-type`), and tagging-accuracy QA (`analytics_reason_mismatches` view + `scripts/run_tagging_qa.py`) to flag miscategorized tickets (done)

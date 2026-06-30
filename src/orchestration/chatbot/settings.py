@@ -34,6 +34,9 @@ class ChatbotSettings(BaseSettings):
     chatbot_rag_enabled: bool = Field(default=True, alias="CHATBOT_RAG_ENABLED")
     chatbot_rag_top_k: int = Field(default=8, alias="CHATBOT_RAG_TOP_K")
     chatbot_rag_min_similarity: float = Field(default=0.30, alias="CHATBOT_RAG_MIN_SIMILARITY")
+    # Restrict RAG retrieval by skill / canonical reason / date detected in the question before
+    # ranking by similarity (falls back to pure similarity when filters match nothing).
+    chatbot_rag_filters_enabled: bool = Field(default=True, alias="CHATBOT_RAG_FILTERS_ENABLED")
 
     # Conversation memory: build on context across turns until the conversation ends.
     chatbot_memory_enabled: bool = Field(default=True, alias="CHATBOT_MEMORY_ENABLED")

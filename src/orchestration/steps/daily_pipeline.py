@@ -5,6 +5,11 @@ from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta, timezone
 from zoneinfo import ZoneInfo
 
+from orchestration.analysis.reason_taxonomy import load_reason_taxonomy
+from orchestration.analysis.reason_taxonomy_builder import (
+    TaxonomyBuildResult,
+    build_reason_taxonomy_map,
+)
 from orchestration.analysis.timeframes import TimeWindow
 from orchestration.config import Settings, get_settings
 from orchestration.db.analytics_views import ensure_analytics_views
@@ -53,6 +58,7 @@ class DailyPipelineResult:
     zendesk: ZendeskExtractionResult | None
     combined: CombinedDatasetResult | None
     classification: TranscriptSummaryResult | None
+    reason_taxonomy: TaxonomyBuildResult | None
     knowledge_index: IndexBuildResult | None
     skipped_steps: list[str]
 
@@ -112,6 +118,22 @@ def run_daily_classification(
     )
 
 
+def run_daily_reason_taxonomy(
+    settings: Settings,
+    *,
+    database_url: str | None = None,
+) -> TaxonomyBuildResult:
+    """Refresh the canonical reason taxonomy map on the given DB (default: pipeline DB).
+
+    Cheap (no LLM): scans the day's freshly classified/combined reasons and resolves each to a
+    canonical label so the chatbot's canonical rankings stay trustworthy as new phrasings appear.
+    """
+    engine = get_engine(database_url or settings.database_url)
+    ensure_analytics_views(engine)
+    taxonomy = load_reason_taxonomy("config/reason_taxonomy.json")
+    return build_reason_taxonomy_map(engine, taxonomy)
+
+
 def run_daily_knowledge_index(
     settings: Settings,
     window: DailyWindow,
@@ -144,6 +166,7 @@ def run_daily_pipeline(
     skip_zendesk: bool = False,
     skip_combined: bool = False,
     skip_classification: bool = False,
+    skip_reason_taxonomy: bool = False,
     skip_knowledge_index: bool = False,
     dry_run: bool = False,
 ) -> DailyPipelineResult:
@@ -201,6 +224,17 @@ def run_daily_pipeline(
     else:
         classification_result = run_daily_classification(settings, window)
 
+    # Canonical reason taxonomy: refresh the free-text -> canonical map so rankings stay
+    # consolidated as new phrasings appear. Derived from data + config, so it is safe in dry-run
+    # too, but skip it then to keep dry-run side-effect free.
+    reason_taxonomy_result: TaxonomyBuildResult | None = None
+    if skip_reason_taxonomy:
+        skipped.append("reason_taxonomy")
+    elif dry_run:
+        skipped.append("reason_taxonomy (dry-run)")
+    else:
+        reason_taxonomy_result = run_daily_reason_taxonomy(settings)
+
     knowledge_index_result: IndexBuildResult | None = None
     if skip_knowledge_index:
         skipped.append("knowledge_index")
@@ -218,6 +252,7 @@ def run_daily_pipeline(
         zendesk=zendesk_result,
         combined=combined_result,
         classification=classification_result,
+        reason_taxonomy=reason_taxonomy_result,
         knowledge_index=knowledge_index_result,
         skipped_steps=skipped,
     )

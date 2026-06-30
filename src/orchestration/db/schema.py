@@ -142,6 +142,30 @@ class TranscriptReductionReasonRow(Base):
     )
 
 
+class ReasonTaxonomyMapRow(Base):
+    """Maps a normalized free-text reason key to its canonical taxonomy label.
+
+    Populated by scripts/build_reason_taxonomy.py from config/reason_taxonomy.json over the
+    distinct reasons observed in cxone_transcript_analysis.primary_reason and
+    combined_interactions.call_reason. Analytics views LEFT JOIN this table to resolve a
+    canonical reason without re-running the LLM, so rankings are not fragmented by phrasing.
+    """
+
+    __tablename__ = "analytics_reason_taxonomy"
+
+    reason_key: Mapped[str] = mapped_column(String(512), primary_key=True)
+    reason_display: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    canonical_reason: Mapped[str] = mapped_column(String(512), nullable=False, default="")
+    sources: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    call_count: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+        onupdate=func.now(),
+    )
+
+
 class ZendeskTicketRow(Base):
     __tablename__ = "zendesk_tickets"
     # Promoted custom-field columns (cf_*) are attached below from config/zendesk_field_map.json
@@ -331,6 +355,15 @@ def ensure_reduction_report_tables(engine) -> None:
     TranscriptReductionReasonRow.__table__.create(engine, checkfirst=True)
 
 
+def ensure_reason_taxonomy_table(engine) -> None:
+    """Create the reason taxonomy mapping table if missing (safe before the analytics views).
+
+    Views LEFT JOIN this table, so it must exist before they are created. An empty table is
+    harmless: every reason then resolves to NULL canonical until the map is built.
+    """
+    ReasonTaxonomyMapRow.__table__.create(engine, checkfirst=True)
+
+
 def init_database(database_url: str) -> None:
     from orchestration.db.analytics_views import ensure_analytics_views
     from orchestration.db.knowledge_schema import ensure_knowledge_schema
@@ -344,6 +377,7 @@ def init_database(database_url: str) -> None:
     ensure_combined_interaction_columns(engine)
     ensure_cxone_transcript_columns(engine)
     CxoneTranscriptAnalysisRow.__table__.create(engine, checkfirst=True)
+    ensure_reason_taxonomy_table(engine)
     ensure_analytics_views(engine)
     ensure_knowledge_schema(engine, required=False)
 

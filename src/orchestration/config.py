@@ -1,7 +1,7 @@
 from datetime import datetime
 from functools import lru_cache
 
-from pydantic import Field, field_validator
+from pydantic import AliasChoices, Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -32,10 +32,13 @@ class Settings(BaseSettings):
     cxone_ia_order: str = Field(default="desc", alias="CXONE_IA_ORDER")
     cxone_ia_page_size: int = Field(default=100, alias="CXONE_IA_PAGE_SIZE")
     cxone_ia_max_pages: int = Field(default=500, alias="CXONE_IA_MAX_PAGES")
-    # Comma-separated mediaType filter on list API (empty = all types).
+    # Comma-separated mediaType filter applied at extract time (empty = ingest ALL channels:
+    # email, chat, SMS, etc.). Default keeps the historical phone-only behavior. To expand
+    # root-cause analysis to other channels, set CXONE_MEDIA_TYPES (e.g. "PhoneCall,Email,Chat"
+    # or leave empty for everything). CXONE_PHONE_MEDIA_TYPES is kept as a backward-compat alias.
     cxone_phone_media_types: str = Field(
         default="PhoneCall",
-        alias="CXONE_PHONE_MEDIA_TYPES",
+        validation_alias=AliasChoices("CXONE_MEDIA_TYPES", "CXONE_PHONE_MEDIA_TYPES"),
     )
     # Concurrent per-segment transcript fetches when enrichment is enabled (see --enrich-transcripts).
     cxone_transcript_fetch_concurrency: int = Field(

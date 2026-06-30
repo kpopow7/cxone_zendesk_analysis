@@ -1,0 +1,67 @@
+{
+  "_comment": "Controlled vocabulary that maps free-text call reasons (from transcript LLM classification AND Zendesk fields) onto a small set of canonical categories so rankings are not fragmented by phrasing. Each category lists 'aliases' (case-insensitive substrings); the first category whose alias is found in a reason becomes its canonical label. Reasons matching nothing fall through to 'fallback_canonical'. Refresh the mapping table after editing: python scripts/build_reason_taxonomy.py",
+  "fallback_canonical": "Other / Uncategorized",
+  "match_mode": "substring",
+  "categories": [
+    {
+      "canonical": "Order status",
+      "aliases": ["order status", "where is my order", "track order", "tracking", "shipment status", "delivery status", "check status", "status of order", "eta"]
+    },
+    {
+      "canonical": "Remake / replacement",
+      "aliases": ["remake", "replacement", "replace", "redo order", "re-make", "damaged product", "broken", "defective"]
+    },
+    {
+      "canonical": "Repair",
+      "aliases": ["repair", "no longer working", "return label", "warranty repair", "ASC", "fix my blind", "fix my shade", "send back for repair"]
+    },
+    {
+      "canonical": "Order placement / changes",
+      "aliases": ["place order", "new order", "place new", "modify order", "change order", "cancel order", "add to order", "order entry", "reorder"]
+    },
+    {
+      "canonical": "Installation help",
+      "aliases": ["install", "installation", "how to install", "mounting", "measure", "measuring", "fit", "how to put up"]
+    },
+    {
+      "canonical": "Warranty / claims",
+      "aliases": ["warranty", "claim", "guarantee", "coverage", "rma", "return authorization"]
+    },
+    {
+      "canonical": "Returns / refunds",
+      "aliases": ["return", "refund", "money back", "send back", "exchange"]
+    },
+    {
+      "canonical": "Billing / payment",
+      "aliases": ["billing", "invoice", "payment", "charge", "charged", "credit card", "price", "pricing", "quote", "overcharge"]
+    },
+    {
+      "canonical": "Product information",
+      "aliases": ["product info", "product information", "specs", "specification", "compatibility", "availability", "in stock", "color", "material", "general question", "pre-sale", "presale"]
+    },
+    {
+      "canonical": "Technical support",
+      "aliases": ["technical", "tech support", "troubleshoot", "not working", "motor", "remote", "app", "battery", "smart home", "connectivity", "pairing"]
+    },
+    {
+      "canonical": "Account / login",
+      "aliases": ["account", "login", "log in", "password", "sign in", "profile", "update info", "update account"]
+    },
+    {
+      "canonical": "Escalation / complaint",
+      "aliases": ["complaint", "escalat", "manager", "supervisor", "dissatisfied", "unhappy", "frustrated"]
+    },
+    {
+      "canonical": "Dealer / partner support",
+      "aliases": ["dealer", "installer", "partner", "trade", "wholesale", "b2b"]
+    },
+    {
+      "canonical": "Parts",
+      "aliases": ["parts", "part", "replacement part", "replacement parts", "replacement part order", "replacement parts order"]
+    },
+    {
+      "canonical": "Motorization",
+      "aliases": ["motorization", "PowerView", "Automation", "pebble", "remote"]
+    }
+  ]
+}

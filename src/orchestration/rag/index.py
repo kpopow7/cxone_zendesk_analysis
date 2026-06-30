@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from collections.abc import Callable
@@ -7,6 +8,7 @@ from typing import Any
 
 from sqlalchemy import text
 from sqlalchemy.engine import Engine
+from sqlalchemy.exc import DBAPIError, OperationalError
 
 from orchestration.db.knowledge_schema import ensure_knowledge_schema
 from orchestration.rag.documents import KnowledgeDocument, build_call_interaction_document, metadata_json
@@ -119,53 +121,16 @@ def build_knowledge_index(
             log(f"ERROR: batch {batch_num}/{total_batches} failed ({len(batch)} docs): {exc}")
             continue
 
-        now = datetime.now(timezone.utc)
-        with engine.begin() as connection:
-            for document, vector in zip(batch, vectors, strict=True):
-                connection.execute(
-                    text(
-                        """
-                        INSERT INTO analytics_knowledge_chunks (
-                            chunk_id, source_type, source_id, interaction_start,
-                            skill_name, primary_reason, secondary_reason,
-                            content, content_hash, metadata, embedding, embedded_at, updated_at
-                        ) VALUES (
-                            :chunk_id, :source_type, :source_id, :interaction_start,
-                            :skill_name, :primary_reason, :secondary_reason,
-                            :content, :content_hash, CAST(:metadata AS jsonb),
-                            CAST(:embedding AS vector), :embedded_at, :embedded_at
-                        )
-                        ON CONFLICT (chunk_id) DO UPDATE SET
-                            source_type = EXCLUDED.source_type,
-                            source_id = EXCLUDED.source_id,
-                            interaction_start = EXCLUDED.interaction_start,
-                            skill_name = EXCLUDED.skill_name,
-                            primary_reason = EXCLUDED.primary_reason,
-                            secondary_reason = EXCLUDED.secondary_reason,
-                            content = EXCLUDED.content,
-                            content_hash = EXCLUDED.content_hash,
-                            metadata = EXCLUDED.metadata,
-                            embedding = EXCLUDED.embedding,
-                            embedded_at = EXCLUDED.embedded_at,
-                            updated_at = EXCLUDED.updated_at
-                        """
-                    ),
-                    {
-                        "chunk_id": document.chunk_id,
-                        "source_type": document.source_type,
-                        "source_id": document.source_id,
-                        "interaction_start": document.interaction_start,
-                        "skill_name": document.skill_name,
-                        "primary_reason": document.primary_reason,
-                        "secondary_reason": document.secondary_reason,
-                        "content": document.content,
-                        "content_hash": document.content_hash,
-                        "metadata": metadata_json(document),
-                        "embedding": vector_literal(vector),
-                        "embedded_at": now,
-                    },
-                )
-                embedded += 1
+        try:
+            _persist_batch(engine, batch, vectors, on_retry=log)
+        except (OperationalError, DBAPIError) as exc:
+            errors += len(batch)
+            log(
+                f"ERROR: batch {batch_num}/{total_batches} write failed after retries "
+                f"({len(batch)} docs): {exc}"
+            )
+            continue
+        embedded += len(batch)
 
         if batch_num == 1 or batch_num == total_batches or batch_num % log_interval == 0:
             log(
@@ -183,6 +148,80 @@ def build_knowledge_index(
         skipped_unchanged=skipped,
         errors=errors,
     )
+
+
+_UPSERT_CHUNK_SQL = """
+INSERT INTO analytics_knowledge_chunks (
+    chunk_id, source_type, source_id, interaction_start,
+    skill_name, primary_reason, secondary_reason,
+    content, content_hash, metadata, embedding, embedded_at, updated_at
+) VALUES (
+    :chunk_id, :source_type, :source_id, :interaction_start,
+    :skill_name, :primary_reason, :secondary_reason,
+    :content, :content_hash, CAST(:metadata AS jsonb),
+    CAST(:embedding AS vector), :embedded_at, :embedded_at
+)
+ON CONFLICT (chunk_id) DO UPDATE SET
+    source_type = EXCLUDED.source_type,
+    source_id = EXCLUDED.source_id,
+    interaction_start = EXCLUDED.interaction_start,
+    skill_name = EXCLUDED.skill_name,
+    primary_reason = EXCLUDED.primary_reason,
+    secondary_reason = EXCLUDED.secondary_reason,
+    content = EXCLUDED.content,
+    content_hash = EXCLUDED.content_hash,
+    metadata = EXCLUDED.metadata,
+    embedding = EXCLUDED.embedding,
+    embedded_at = EXCLUDED.embedded_at,
+    updated_at = EXCLUDED.updated_at
+"""
+
+
+def _persist_batch(
+    engine: Engine,
+    batch: list[KnowledgeDocument],
+    vectors: list[list[float]],
+    *,
+    on_retry: Callable[[str], None],
+    max_attempts: int = 4,
+) -> None:
+    """Upsert one batch, retrying transient connection drops with backoff.
+
+    Each attempt runs in its own transaction, so a dropped connection mid-write
+    (e.g. proxy idle timeout / SSL eof) is safely retried on a fresh connection.
+    """
+    for attempt in range(1, max_attempts + 1):
+        try:
+            now = datetime.now(timezone.utc)
+            with engine.begin() as connection:
+                for document, vector in zip(batch, vectors, strict=True):
+                    connection.execute(
+                        text(_UPSERT_CHUNK_SQL),
+                        {
+                            "chunk_id": document.chunk_id,
+                            "source_type": document.source_type,
+                            "source_id": document.source_id,
+                            "interaction_start": document.interaction_start,
+                            "skill_name": document.skill_name,
+                            "primary_reason": document.primary_reason,
+                            "secondary_reason": document.secondary_reason,
+                            "content": document.content,
+                            "content_hash": document.content_hash,
+                            "metadata": metadata_json(document),
+                            "embedding": vector_literal(vector),
+                            "embedded_at": now,
+                        },
+                    )
+            return
+        except (OperationalError, DBAPIError) as exc:
+            if attempt >= max_attempts or not getattr(exc, "connection_invalidated", True):
+                raise
+            backoff = min(30.0, 2.0 ** attempt)
+            on_retry(
+                f"WARN: DB write failed (attempt {attempt}/{max_attempts}), "
+                f"retrying in {backoff:.0f}s: {exc}"
+            )
+            time.sleep(backoff)
 
 
 def _fetch_source_rows(

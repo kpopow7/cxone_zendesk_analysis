@@ -4,6 +4,7 @@ import json
 import re
 from dataclasses import dataclass
 
+from orchestration.analysis.channels import channel_label, transcript_label
 from orchestration.analysis.llm_client import chat_completion_text, truncate_text
 from orchestration.analysis.reasons import normalize_reason_key
 
@@ -22,8 +23,8 @@ class TranscriptReasonAnalysis:
 
 
 _SYSTEM_PROMPT = (
-    "You classify contact-center phone calls from transcripts. "
-    "Respond with valid JSON only — no markdown."
+    "You classify contact-center customer interactions (phone calls, chats, emails) from "
+    "their transcripts. Respond with valid JSON only — no markdown."
 )
 
 
@@ -34,8 +35,14 @@ def _build_classification_prompt(
     client_sentiment: str | None,
     skill_name: str | None,
     agent_name: str | None,
+    media_type: str | None = None,
 ) -> str:
+    interaction_noun = channel_label(media_type)  # e.g. "phone call", "chat", "email"
+    body_noun = transcript_label(media_type)  # e.g. "transcript", "email thread"
+
     context_lines: list[str] = []
+    if media_type:
+        context_lines.append(f"Channel: {media_type}")
     if skill_name:
         context_lines.append(f"Skill/queue: {skill_name}")
     if agent_name:
@@ -49,9 +56,10 @@ def _build_classification_prompt(
     context_section = f"Metadata:\n{context_block}\n\n" if context_block else ""
 
     return (
-        "Analyze this call transcript. Ignore hold music and small talk.\n\n"
+        f"Analyze this {body_noun}. Ignore hold music, signatures, "
+        "automated boilerplate, and small talk.\n\n"
         f"{context_section}"
-        f"Transcript:\n{transcript}\n\n"
+        f"{body_noun.capitalize()}:\n{transcript}\n\n"
         "Return a JSON object with these keys:\n"
         '- "transcript_summary": 2-4 sentences on what happened and outcome\n'
         '- "primary_reason": broad category (3-6 words), e.g. "Remake order", '
@@ -59,11 +67,12 @@ def _build_classification_prompt(
         '- "secondary_reason": specific intent within the primary category (5-12 words), '
         'e.g. for Remake: "Place new remake order", "Ask remake policy/eligibility", '
         '"Check remake status"\n'
-        '- "tertiary_reason": finest useful slice (5-15 words) — what the caller was '
-        "trying to accomplish in this call (optional, null if not distinct)\n"
+        '- "tertiary_reason": finest useful slice (5-15 words) — what the customer was '
+        f"trying to accomplish in this {interaction_noun} (optional, null if not distinct)\n"
         '- "reduction_hint": one sentence on what product/process/self-service change '
-        "could prevent similar calls\n\n"
-        "Use consistent, title-case phrasing. Do not invent facts not supported by the transcript."
+        f"could prevent similar {interaction_noun}s\n\n"
+        "Use consistent, title-case phrasing. Do not invent facts not supported by the "
+        f"{body_noun}."
     )
 
 
@@ -120,6 +129,7 @@ def classify_transcript(
     base_url: str,
     timeout_seconds: float,
     max_transcript_chars: int,
+    media_type: str | None = None,
 ) -> TranscriptReasonAnalysis:
     transcript = transcript_text.strip()
     if not transcript:
@@ -133,6 +143,7 @@ def classify_transcript(
         client_sentiment=client_sentiment,
         skill_name=skill_name,
         agent_name=agent_name,
+        media_type=media_type,
     )
     content = chat_completion_text(
         prompt=prompt,
