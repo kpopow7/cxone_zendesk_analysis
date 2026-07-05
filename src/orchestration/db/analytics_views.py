@@ -8,6 +8,7 @@ from orchestration.db.schema import (
     ensure_reason_taxonomy_table,
     ensure_reduction_report_tables,
 )
+from orchestration.zendesk.channels import IS_PHONE_BRIDGE_TICKET_SQL
 
 ANALYTICS_INTERACTIONS_VIEW = f"""
 CREATE OR REPLACE VIEW analytics_interactions AS
@@ -32,6 +33,7 @@ SELECT
     ci.ticket_status,
     ci.ticket_priority,
     ci.ticket_tags,
+    ci.ticket_via_channel,
     ci.ticket_form_id,
     f.name AS ticket_form_name,
     ci.zendesk_promoted_fields,
@@ -47,6 +49,50 @@ FROM combined_interactions AS ci
 LEFT JOIN zendesk_ticket_forms AS f ON f.form_id = ci.ticket_form_id
 LEFT JOIN analytics_reason_taxonomy AS rt
     ON rt.reason_key = {reason_key_sql('ci.call_reason')}
+"""
+
+# All Zendesk tickets (email, chat, web, phone) — not limited to CXone-linked rows.
+ANALYTICS_ZENDESK_TICKETS_VIEW = f"""
+CREATE OR REPLACE VIEW analytics_zendesk_tickets AS
+SELECT
+    z.ticket_id,
+    z.created_at,
+    z.updated_at,
+    z.status,
+    z.priority,
+    z.subject,
+    left(z.description, 800) AS description_preview,
+    z.tags,
+    z.via_channel,
+    z.ticket_form_id,
+    f.name AS ticket_form_name,
+    {IS_PHONE_BRIDGE_TICKET_SQL} AS is_phone_bridge_ticket,
+    z.promoted_fields,
+    z.extracted_at
+FROM zendesk_tickets AS z
+LEFT JOIN zendesk_ticket_forms AS f ON f.form_id = z.ticket_form_id
+"""
+
+# Parent/detail tickets only — excludes phone-call bridge rows so channel counts do not
+# double-count voice alongside the linked parent ticket.
+ANALYTICS_ZENDESK_TICKET_CHANNELS_VIEW = """
+CREATE OR REPLACE VIEW analytics_zendesk_ticket_channels AS
+SELECT
+    ticket_id,
+    created_at,
+    updated_at,
+    status,
+    priority,
+    subject,
+    description_preview,
+    tags,
+    via_channel,
+    ticket_form_id,
+    ticket_form_name,
+    promoted_fields,
+    extracted_at
+FROM analytics_zendesk_tickets
+WHERE is_phone_bridge_ticket = false
 """
 
 ANALYTICS_TRANSCRIPT_SUMMARIES_VIEW = f"""
@@ -354,6 +400,10 @@ def ensure_analytics_views(engine: Engine) -> None:
         # Postgres CREATE OR REPLACE cannot insert columns mid-view; drop first.
         connection.execute(text("DROP VIEW IF EXISTS analytics_interactions CASCADE"))
         connection.execute(text(ANALYTICS_INTERACTIONS_VIEW))
+        connection.execute(text("DROP VIEW IF EXISTS analytics_zendesk_ticket_channels CASCADE"))
+        connection.execute(text("DROP VIEW IF EXISTS analytics_zendesk_tickets CASCADE"))
+        connection.execute(text(ANALYTICS_ZENDESK_TICKETS_VIEW))
+        connection.execute(text(ANALYTICS_ZENDESK_TICKET_CHANNELS_VIEW))
         connection.execute(text("DROP VIEW IF EXISTS analytics_transcript_summaries CASCADE"))
         connection.execute(text(ANALYTICS_TRANSCRIPT_SUMMARIES_VIEW))
         connection.execute(text("DROP VIEW IF EXISTS analytics_reduction_recommendations CASCADE"))

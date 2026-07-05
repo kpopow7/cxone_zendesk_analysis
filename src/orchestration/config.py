@@ -109,4 +109,41 @@ def get_settings() -> Settings:
 
 def parse_iso_datetime(value: str) -> datetime:
     normalized = value.strip().replace("Z", "+00:00")
-    return datetime.fromisoformat(normalized)
+    try:
+        return datetime.fromisoformat(normalized)
+    except ValueError:
+        # datetime.fromisoformat requires zero-padded fields (e.g. "02", not "2").
+        # Be lenient and zero-pad each date/time component so inputs like
+        # "2026-2-10T23:59:59+00:00" parse correctly.
+        return datetime.fromisoformat(_zero_pad_iso_datetime(normalized))
+
+
+def _zero_pad_iso_datetime(value: str) -> str:
+    import re
+
+    match = re.match(
+        r"^(?P<y>\d{4})-(?P<mo>\d{1,2})-(?P<d>\d{1,2})"
+        r"(?:[T ](?P<h>\d{1,2}):(?P<mi>\d{1,2})(?::(?P<s>\d{1,2}))?)?"
+        r"(?P<tz>[+-]\d{1,2}:?\d{0,2})?$",
+        value,
+    )
+    if not match:
+        return value
+
+    parts = match.groupdict()
+    date_str = f"{parts['y']}-{int(parts['mo']):02d}-{int(parts['d']):02d}"
+
+    if parts["h"] is None:
+        time_str = ""
+    else:
+        seconds = int(parts["s"]) if parts["s"] is not None else 0
+        time_str = f"T{int(parts['h']):02d}:{int(parts['mi']):02d}:{seconds:02d}"
+
+    tz_str = parts["tz"] or ""
+    if tz_str and ":" not in tz_str:
+        sign, digits = tz_str[0], tz_str[1:]
+        hours = digits[:2] if len(digits) >= 2 else digits
+        minutes = digits[2:4] if len(digits) > 2 else "00"
+        tz_str = f"{sign}{int(hours):02d}:{int(minutes or '0'):02d}"
+
+    return f"{date_str}{time_str}{tz_str}"

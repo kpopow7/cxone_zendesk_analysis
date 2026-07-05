@@ -41,6 +41,8 @@ DO_BLOCK_PATTERN = re.compile(r"\bDO\s+\$\$", re.IGNORECASE)
 ALLOWED_RELATIONS = frozenset(
     {
         "analytics_interactions",
+        "analytics_zendesk_tickets",
+        "analytics_zendesk_ticket_channels",
         "analytics_transcript_summaries",
         "analytics_reduction_recommendations",
         "analytics_interaction_outcomes",

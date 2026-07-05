@@ -8,6 +8,8 @@ import httpx
 from tenacity import retry, retry_if_exception, stop_after_attempt, wait_exponential
 
 from orchestration.chatbot.memory import ConversationMemory
+from orchestration.chatbot.openai_client import friendly_openai_error, is_retryable_openai_error
+from orchestration.chatbot.responses import ChatbotResponse
 from orchestration.chatbot.schema_context import build_schema_prompt
 from orchestration.chatbot.settings import ChatbotSettings
 from orchestration.chatbot.sql_executor import QueryResult, execute_readonly_query, format_results_for_llm
@@ -25,44 +27,11 @@ from orchestration.rag.router import detect_intents, route_question
 
 
 def _is_retryable_openai_error(exc: BaseException) -> bool:
-    if isinstance(exc, httpx.HTTPStatusError):
-        return exc.response.status_code in (429, 500, 502, 503, 504)
-    return isinstance(exc, (httpx.TimeoutException, httpx.NetworkError))
+    return is_retryable_openai_error(exc)
 
 
 def _friendly_openai_error(exc: httpx.HTTPStatusError) -> str:
-    code = exc.response.status_code
-    if code == 429:
-        return (
-            "OpenAI rate limit reached (HTTP 429). Each question uses two API calls "
-            "(SQL generation + summary). Wait a minute and try again, or check usage and "
-            "billing limits at https://platform.openai.com/usage"
-        )
-    if code in (401, 403):
-        return (
-            "OpenAI rejected the API key (HTTP "
-            f"{code}). Check OPENAI_API_KEY on the chatbot service."
-        )
-    if code == 404:
-        return (
-            f"OpenAI model not found (HTTP 404). Check OPENAI_MODEL "
-            f"({exc.request.url}); current setting must be available on your account."
-        )
-    body = exc.response.text.strip()
-    if len(body) > 200:
-        body = f"{body[:200]}..."
-    return f"OpenAI API error (HTTP {code}){f': {body}' if body else ''}"
-
-
-@dataclass
-class ChatbotResponse:
-    answer: str
-    sql: str | None = None
-    row_count: int | None = None
-    error: str | None = None
-    mode: str = "sql"
-    rag_sources: int = 0
-    debug: dict = field(default_factory=dict)
+    return friendly_openai_error(exc)
 
 
 SKILLS_QUERY = (
@@ -77,6 +46,7 @@ class ChatbotAgent:
         self._engine = get_engine(settings.database_url)
         self._known_skills_cache: list[str] | None = None
         self._taxonomy_cache: ReasonTaxonomy | None = None
+        self._orchestrator = None
 
     def _known_skills(self) -> list[str]:
         """Distinct CXone skill names, cached for the agent's lifetime (for filter matching)."""
@@ -172,6 +142,35 @@ class ChatbotAgent:
         return response
 
     def _respond(
+        self,
+        question: str,
+        memory: ConversationMemory,
+        *,
+        form_types: list[str] | None = None,
+    ) -> ChatbotResponse:
+        if self._settings.chatbot_agent_enabled:
+            return self._orchestrator_instance().run(
+                question,
+                memory,
+                form_types=form_types,
+            )
+        return self._respond_legacy(question, memory, form_types=form_types)
+
+    def _orchestrator_instance(self):
+        if self._orchestrator is None:
+            from orchestration.chatbot.orchestrator import AgentOrchestrator
+
+            self._orchestrator = AgentOrchestrator(
+                engine=self._engine,
+                settings=self._settings,
+                known_skills=self._known_skills,
+                known_form_names=self.available_form_types,
+                reason_taxonomy=self._reason_taxonomy,
+                chat_completion=self._chat_completion,
+            )
+        return self._orchestrator
+
+    def _respond_legacy(
         self,
         question: str,
         memory: ConversationMemory,

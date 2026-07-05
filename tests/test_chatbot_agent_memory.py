@@ -2,7 +2,8 @@ from __future__ import annotations
 
 import pytest
 
-from orchestration.chatbot.agent import ChatbotAgent, ChatbotResponse
+from orchestration.chatbot.agent import ChatbotAgent
+from orchestration.chatbot.responses import ChatbotResponse
 from orchestration.chatbot.memory import ConversationMemory
 from orchestration.chatbot.settings import ChatbotSettings
 

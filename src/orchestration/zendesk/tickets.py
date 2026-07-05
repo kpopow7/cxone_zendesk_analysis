@@ -14,6 +14,7 @@ from orchestration.zendesk.field_map import (
     resolve_field_map_path,
     slugify_field_title,
 )
+from orchestration.zendesk.channels import resolve_ticket_via_channel
 from orchestration.zendesk.ticket_fields import TicketFieldCatalog
 
 
@@ -128,6 +129,7 @@ class ZendeskTicketExtractor:
     ) -> TicketRecord:
         ticket_id = int(ticket["id"])
         via = ticket.get("via") if isinstance(ticket.get("via"), dict) else {}
+        tags = _normalize_tags(ticket.get("tags"))
         custom_fields, promoted_values = _parse_custom_fields(
             ticket.get("custom_fields"),
             catalog,
@@ -143,7 +145,7 @@ class ZendeskTicketExtractor:
             status=_optional_str(ticket.get("status")),
             priority=_optional_str(ticket.get("priority")),
             ticket_type=_optional_str(ticket.get("type")),
-            tags=_normalize_tags(ticket.get("tags")),
+            tags=tags,
             created_at=_parse_dt(ticket.get("created_at")),
             updated_at=_parse_dt(ticket.get("updated_at")),
             due_at=_parse_dt(ticket.get("due_at")),
@@ -154,7 +156,10 @@ class ZendeskTicketExtractor:
             group_id=_optional_int(ticket.get("group_id")),
             brand_id=_optional_int(ticket.get("brand_id")),
             ticket_form_id=_optional_int(ticket.get("ticket_form_id")),
-            via_channel=_optional_str(via.get("channel")),
+            via_channel=resolve_ticket_via_channel(
+                tags=tags,
+                raw_via_channel=_optional_str(via.get("channel")),
+            ),
             recipient=_optional_str(ticket.get("recipient")),
             is_public=ticket.get("is_public") if isinstance(ticket.get("is_public"), bool) else None,
             has_incidents=ticket.get("has_incidents")

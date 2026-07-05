@@ -139,12 +139,13 @@ with gr.Blocks(title="Contact Center Analytics Assistant") as demo:
         type="messages",
         title="Contact Center Analytics Assistant",
         description=(
-            "Ask about call volume, reasons, dispositions, skills, trends, and contextual "
-            "questions about what customers are calling about (semantic search over call summaries). "
-            "Use the ticket form-type filter to focus on specific Zendesk forms (e.g. 'Assist (Internal)'). "
-            "The assistant remembers the current conversation, so you can ask follow-ups that "
-            "build on earlier questions. Data is queried live from PostgreSQL (Railway). "
-            "**Company login required.**"
+            "Ask about call volume, reasons, dispositions, skills, trends, and what to do to "
+            "reduce volume. The assistant uses a tool-based agent: it can resolve form types/skills, "
+            "run analytics queries, fetch reduction recommendations, and search call examples — "
+            "then combine results into one answer. "
+            "Use the ticket form-type filter to focus on specific Zendesk forms (e.g. 'Assist (internal)'). "
+            "The assistant remembers the current conversation for follow-ups. "
+            "Data is queried live from PostgreSQL (Railway). **Company login required.**"
         ),
         additional_inputs=additional_inputs,
         examples=[[question] + [None] * len(additional_inputs) for question in EXAMPLE_QUESTIONS],

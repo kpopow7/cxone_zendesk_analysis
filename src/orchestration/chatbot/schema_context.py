@@ -19,6 +19,7 @@ Columns:
 - link_method (text) — call_object_to_parent = fully linked; unmatched = no Zendesk match
 - ticket_subject, ticket_description, ticket_status, ticket_priority (text)
 - ticket_tags (jsonb array)
+- ticket_via_channel (text) — Zendesk channel on the parent ticket: voice=phone, mail=email, web=web form, chat=chat. Phone-bridge tickets tagged "agent created" are stored as voice even when Zendesk reports another channel
 - ticket_form_id (bigint) — numeric Zendesk ticket form id
 - ticket_form_name (text) — human ticket form type, e.g. "Assist (Internal)"; use this to group/filter by form type
 - call_reason (text) — unified reason across all Zendesk forms (human-readable, free text)
@@ -142,6 +143,27 @@ The controlled vocabulary map. Columns: reason_key (text, normalized free text),
 (text), canonical_reason (text), sources (text), call_count (bigint). Query directly only to list
 canonical categories or inspect how a raw reason maps; otherwise use the *_canonical columns above.
 
+## All Zendesk tickets: analytics_zendesk_tickets
+One row per Zendesk ticket across ALL channels — not limited to CXone-linked phone calls.
+Includes phone-call bridge tickets (Phone Call form / "agent created" tag) used to link
+CXone calls to parent tickets. Do NOT use this view for channel volume counts.
+
+Columns:
+- ticket_id (bigint, PK), created_at, updated_at (timestamptz)
+- status, priority, subject (text), description_preview (text)
+- tags (jsonb array)
+- via_channel (text) — voice=phone, mail=email, web=web form, chat=chat
+- ticket_form_id (bigint), ticket_form_name (text)
+- is_phone_bridge_ticket (bool) — true for Phone Call form / "agent created" bridge rows
+- promoted_fields (jsonb) — promoted Zendesk custom fields
+
+## Zendesk channel counts: analytics_zendesk_ticket_channels (PREFER for ticket volume by channel)
+Parent/detail tickets only — excludes phone-call bridge rows so voice is not double-counted
+with the linked parent ticket. Use for email/chat/web/phone ticket volume by via_channel.
+
+Columns: same as analytics_zendesk_tickets except is_phone_bridge_ticket is omitted
+(all rows are non-bridge parent/detail tickets).
+
 ## Fallback: combined_interactions
 Same as analytics_interactions but includes full transcript_text (large). Prefer analytics_interactions.
 
@@ -157,7 +179,9 @@ analytics_interactions.ticket_form_name. Query zendesk_ticket_forms directly onl
 - For "do agent tags match the call" or tagging-accuracy questions, use analytics_reason_reconciliation for the rates; use analytics_reason_mismatches to list the specific mis-tagged tickets (exclude 'Other / Uncategorized' on both sides for confident mis-tags)
 - For dispositions: use disposition_label (not individual cf_disposition_* JSON keys)
 - Inbound calls: upper(replace(call_direction, '-', '_')) LIKE '%IN_BOUND%'
-- media_type identifies the channel (e.g. PhoneCall, Email, Chat). Most data is PhoneCall; filter media_type = 'PhoneCall' only when the user specifically asks about phone calls, or filter to Email/Chat when they ask about those channels. When the user asks about "contacts"/"interactions" generally, do not restrict media_type
+- media_type identifies the CXone channel (e.g. PhoneCall, Email, Chat). Most combined rows are PhoneCall; filter media_type = 'PhoneCall' only when the user specifically asks about phone calls, or filter to Email/Chat when they ask about those channels. When the user asks about "contacts"/"interactions" generally, do not restrict media_type
+- For Zendesk ticket channel volume (email/chat/web/phone counts), use analytics_zendesk_ticket_channels — NOT analytics_zendesk_tickets. Bridge tickets (Phone Call form / "agent created" tag) link a call to a parent ticket and must be excluded from channel counts to avoid double-counting voice
+- Zendesk via_channel values: voice=phone, mail=email, web=web form, chat=chat. "agent created" tag marks a phone bridge ticket (stored as voice but excluded from channel counts)
 - Default to inbound PhoneCall when the user asks about "calls" without specifying a channel or direction
 - Prefer link_method = 'call_object_to_parent' for ticket-enriched analysis unless user wants all segments
 - For transcript-only LLM reasons (primary/secondary/tertiary), use analytics_transcript_summaries — not call_reason from Zendesk
@@ -202,6 +226,14 @@ WHERE interaction_start >= NOW() - INTERVAL '7 days'
   AND ticket_form_name IS NOT NULL
 GROUP BY ticket_form_name
 ORDER BY call_count DESC
+LIMIT 20;
+
+Zendesk ticket volume by channel last 7 days (deduped — excludes phone bridge tickets):
+SELECT via_channel, COUNT(*) AS ticket_count
+FROM analytics_zendesk_ticket_channels
+WHERE created_at >= NOW() - INTERVAL '7 days'
+GROUP BY via_channel
+ORDER BY ticket_count DESC
 LIMIT 20;
 
 Top call reasons for specific form types:

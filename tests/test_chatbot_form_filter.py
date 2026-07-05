@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from orchestration.chatbot.agent import ChatbotAgent, ChatbotResponse, _form_filter_instruction
+from orchestration.chatbot.agent import ChatbotAgent, _form_filter_instruction
+from orchestration.chatbot.responses import ChatbotResponse
 from orchestration.chatbot.memory import ConversationMemory
 from orchestration.chatbot.schema_context import build_schema_prompt
 from orchestration.chatbot.settings import ChatbotSettings
