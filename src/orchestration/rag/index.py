@@ -11,7 +11,12 @@ from sqlalchemy.engine import Engine
 from sqlalchemy.exc import DBAPIError, OperationalError
 
 from orchestration.db.knowledge_schema import ensure_knowledge_schema
-from orchestration.rag.documents import KnowledgeDocument, build_call_interaction_document, metadata_json
+from orchestration.rag.documents import (
+    KnowledgeDocument,
+    build_call_interaction_document,
+    build_zendesk_ticket_document,
+    metadata_json,
+)
 from orchestration.rag.embeddings import embed_texts, vector_literal
 
 
@@ -50,6 +55,26 @@ WHERE COALESCE(s.segment_id, i.segment_id) IS NOT NULL
   )
 """
 
+ZENDESK_TICKETS_SOURCE_QUERY = """
+SELECT
+    ticket_id,
+    created_at,
+    status,
+    priority,
+    subject,
+    description_preview,
+    tags,
+    via_channel,
+    ticket_form_name,
+    promoted_fields
+FROM analytics_zendesk_ticket_channels
+WHERE (
+    NULLIF(trim(COALESCE(subject, '')), '') IS NOT NULL
+    OR NULLIF(trim(COALESCE(description_preview, '')), '') IS NOT NULL
+    OR promoted_fields <> '{}'::jsonb
+)
+"""
+
 
 @dataclass(frozen=True)
 class IndexBuildResult:
@@ -79,13 +104,30 @@ def build_knowledge_index(
     ensure_knowledge_schema(engine, required=True)
 
     log("Fetching source rows...")
-    rows = _fetch_source_rows(engine, start=start, end=end, limit=limit)
+    call_rows = _fetch_source_rows(
+        engine, query=SOURCE_QUERY, start=start, end=end, date_column="interaction_start", limit=limit
+    )
+    ticket_rows = _fetch_source_rows(
+        engine,
+        query=ZENDESK_TICKETS_SOURCE_QUERY,
+        start=start,
+        end=end,
+        date_column="created_at",
+        limit=limit,
+    )
     documents: list[KnowledgeDocument] = []
-    for row in rows:
+    for row in call_rows:
         document = build_call_interaction_document(dict(row))
         if document is not None:
             documents.append(document)
-    log(f"Fetched {len(rows)} row(s), {len(documents)} document(s) to index.")
+    for row in ticket_rows:
+        document = build_zendesk_ticket_document(dict(row))
+        if document is not None:
+            documents.append(document)
+    log(
+        f"Fetched {len(call_rows)} call row(s) and {len(ticket_rows)} ticket row(s), "
+        f"{len(documents)} document(s) to index."
+    )
 
     log("Checking existing embeddings...")
     existing_hashes = _load_existing_hashes(engine, [doc.chunk_id for doc in documents])
@@ -227,29 +269,32 @@ def _persist_batch(
 def _fetch_source_rows(
     engine: Engine,
     *,
+    query: str,
     start: datetime | None,
     end: datetime | None,
+    date_column: str,
     limit: int | None,
 ) -> list[dict[str, Any]]:
-    query = SOURCE_QUERY
     params: dict[str, Any] = {}
     filters: list[str] = []
 
     if start is not None:
-        filters.append("COALESCE(s.interaction_start, i.interaction_start) >= :start")
+        filters.append(f"{date_column} >= :start")
         params["start"] = start
     if end is not None:
-        filters.append("COALESCE(s.interaction_start, i.interaction_start) <= :end")
+        filters.append(f"{date_column} <= :end")
         params["end"] = end
+
+    full_query = query
     if filters:
-        query += " AND " + " AND ".join(filters)
-    query += " ORDER BY COALESCE(s.interaction_start, i.interaction_start) DESC NULLS LAST"
+        full_query += " AND " + " AND ".join(filters)
+    full_query += f" ORDER BY {date_column} DESC NULLS LAST"
     if limit is not None:
-        query += " LIMIT :limit"
+        full_query += " LIMIT :limit"
         params["limit"] = limit
 
     with engine.connect() as connection:
-        result = connection.execute(text(query), params)
+        result = connection.execute(text(full_query), params)
         return [dict(row) for row in result.mappings().all()]
 
 

@@ -61,8 +61,9 @@ TOOL_DEFINITIONS: list[dict] = [
             "name": "run_analytics_sql",
             "description": (
                 "Run a structured analytics query against PostgreSQL views. Prefer vetted intents "
-                "over raw SQL. Intents: top_reasons, top_transcript_reasons, count_by_dimension, "
-                "drilldown, trend_compare."
+                "over raw SQL. Call intents: top_reasons, top_transcript_reasons, count_by_dimension, "
+                "drilldown, trend_compare. Ticket intents: ticket_channels, top_ticket_volume_by_form, "
+                "ticket_drilldown, ticket_count_by_dimension."
             ),
             "parameters": {
                 "type": "object",
@@ -103,10 +104,39 @@ TOOL_DEFINITIONS: list[dict] = [
     {
         "type": "function",
         "function": {
+            "name": "search_knowledge",
+            "description": (
+                "Semantic search over indexed call transcripts AND Zendesk tickets. Use for "
+                "qualitative 'why' questions, patterns, and example tickets/calls. Prefer "
+                "source_type=zendesk_ticket for email/chat/web ticket questions; "
+                "source_type=call_interaction for phone call narratives; source_type=all when unsure."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "question": {
+                        "type": "string",
+                        "description": "Search query (defaults to the user's question if omitted)",
+                    },
+                    "source_type": {
+                        "type": "string",
+                        "enum": ["all", "call_interaction", "zendesk_ticket"],
+                        "description": "Which knowledge source to search (default all)",
+                    },
+                    "skill_name": {"type": "string"},
+                    "canonical_reason": {"type": "string"},
+                    "top_k": {"type": "integer"},
+                },
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "search_interactions",
             "description": (
-                "Semantic search over call summaries for qualitative 'why' questions and examples. "
-                "Use when the user wants patterns, narratives, or sample calls."
+                "Semantic search over phone call summaries only (subset of search_knowledge). "
+                "Prefer search_knowledge unless you specifically need call-only examples."
             ),
             "parameters": {
                 "type": "object",
@@ -145,19 +175,32 @@ TOOL_DEFINITIONS: list[dict] = [
     },
 ]
 
-PLANNER_SYSTEM_PROMPT = """You are a contact-center analytics agent with tools to query PostgreSQL.
+PLANNER_SYSTEM_PROMPT = """You are a contact-center analytics agent with tools to query PostgreSQL and semantic search.
+
+Data source routing (critical — do not default everything to analytics_interactions):
+- Phone calls linked to Zendesk parent tickets → run_analytics_sql on analytics_interactions
+  (intents: top_reasons, count_by_dimension, trend_compare, drilldown)
+- All Zendesk tickets (email, chat, web, phone parents) → run_analytics_sql ticket intents:
+  ticket_channels, top_ticket_volume_by_form, ticket_drilldown, ticket_count_by_dimension
+  (these use analytics_zendesk_ticket_channels — bridge tickets excluded)
+- Qualitative examples / "why" on phone calls → search_knowledge with source_type=call_interaction
+- Qualitative examples on email/chat/web tickets → search_knowledge with source_type=zendesk_ticket
+- General semantic search when unsure → search_knowledge with source_type=all
+- Do NOT use analytics_interactions for email/chat/web ticket volume or ticket-only questions
 
 Workflow:
 1. If the user mentions a form type, skill, or reason category, call resolve_entities first.
-2. Use run_analytics_sql with vetted intents for counts, rankings, trends, drill-downs.
-3. Use get_reduction_recommendations when the user asks what to do / how to reduce volume.
-4. Use search_interactions for qualitative 'why' questions or example calls.
-5. If a query returns 0 rows, try list_catalog or broaden filters (ILIKE form names, widen date range).
-6. When you have enough data, stop calling tools and respond with a short plan summary in plain text.
+2. Pick the correct data source using the routing rules above.
+3. Use run_analytics_sql with vetted intents for counts, rankings, trends, drill-downs.
+4. Use get_reduction_recommendations when the user asks what to do / how to reduce volume.
+5. Use search_knowledge for qualitative 'why' questions or example tickets/calls.
+6. If a query returns 0 rows, try list_catalog or broaden filters (widen date range, try search_knowledge).
+7. When you have enough data, stop calling tools and respond with a short plan summary in plain text.
 
 Rules:
 - Never invent numbers; only use tool results.
-- Prefer call_reason_canonical / primary_reason_canonical for rankings.
+- Prefer call_reason_canonical / primary_reason_canonical for call rankings.
+- For Zendesk channel counts use ticket_channels intent (deduped — no phone-bridge double count).
 - Reduction recommendations are phone-wide, not per ticket form — note that when relevant.
 - UI form-type filters (if active) are mandatory — use those exact form_names in SQL tools.
 """

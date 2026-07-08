@@ -54,7 +54,7 @@ def resolve_entities(
     reason_hints = [h for h in (reason_hints or []) if str(h).strip()]
 
     if known_form_names is None:
-        forms = _load_distinct(engine, "ticket_form_name", "analytics_interactions")
+        forms = _load_union_form_names(engine)
     else:
         forms = list(known_form_names)
 
@@ -111,9 +111,7 @@ def list_catalog(
     limit = max(1, min(limit, 500))
 
     if dim in ("form_type", "form_types", "ticket_form", "ticket_form_name", "ticket_form_names"):
-        values = known_form_names or _load_distinct(
-            engine, "ticket_form_name", "analytics_interactions", limit=limit
-        )
+        values = known_form_names or _load_union_form_names(engine, limit=limit)
         return {"dimension": "form_types", "values": values[:limit]}
 
     if dim in ("skill", "skills", "skill_name"):
@@ -142,9 +140,31 @@ def list_catalog(
         return {"dimension": "canonical_reasons", "values": values[:limit]}
 
     return {
-        "error": f"Unknown dimension: {dimension}. Try form_types, skills, media_types, or canonical_reasons.",
+        "error": (
+            f"Unknown dimension: {dimension}. Try form_types, skills, media_types, "
+            "ticket_channels, or canonical_reasons."
+        ),
         "values": [],
     }
+
+
+def _load_union_form_names(engine: Engine, *, limit: int = 500) -> list[str]:
+    stmt = text(
+        """
+        SELECT DISTINCT ticket_form_name AS value
+        FROM (
+            SELECT ticket_form_name FROM analytics_interactions
+            WHERE ticket_form_name IS NOT NULL AND TRIM(ticket_form_name) <> ''
+            UNION
+            SELECT ticket_form_name FROM analytics_zendesk_tickets
+            WHERE ticket_form_name IS NOT NULL AND TRIM(ticket_form_name) <> ''
+        ) AS forms
+        ORDER BY value
+        LIMIT :lim
+        """
+    )
+    with engine.connect() as connection:
+        return [str(row.value) for row in connection.execute(stmt, {"lim": limit})]
 
 
 def _load_distinct(

@@ -9,7 +9,7 @@ from orchestration.chatbot.agent_state import AgentRunState
 from orchestration.chatbot.settings import ChatbotSettings
 from orchestration.chatbot.tools.analytics import run_analytics_sql
 from orchestration.chatbot.tools.entities import list_catalog, resolve_entities
-from orchestration.chatbot.tools.rag import search_interactions
+from orchestration.chatbot.tools.rag import search_interactions, search_knowledge
 from orchestration.chatbot.tools.reductions import get_reduction_recommendations
 from sqlalchemy.engine import Engine
 
@@ -67,6 +67,21 @@ def execute_tool(name: str, arguments: dict[str, Any], ctx: ToolContext, state: 
             inbound_only=bool(args.get("inbound_only", True)),
             dimension=args.get("dimension"),
             reason_filter=args.get("reason_filter"),
+        )
+
+    if name == "search_knowledge":
+        question = str(args.get("question") or ctx.contextual_question)
+        return search_knowledge(
+            engine=ctx.engine,
+            settings=ctx.settings,
+            question=question,
+            embed_query=ctx.contextual_question,
+            known_skills=ctx.known_skills(),
+            taxonomy=ctx.reason_taxonomy(),
+            skill_name=args.get("skill_name"),
+            canonical_reason=args.get("canonical_reason"),
+            source_type=str(args.get("source_type") or "all"),
+            top_k=args.get("top_k"),
         )
 
     if name == "search_interactions":

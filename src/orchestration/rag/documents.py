@@ -104,6 +104,79 @@ def build_call_interaction_document(row: dict[str, Any]) -> KnowledgeDocument | 
     )
 
 
+def build_zendesk_ticket_document(row: dict[str, Any]) -> KnowledgeDocument | None:
+    """Build one searchable narrative document for a parent/detail Zendesk ticket."""
+    ticket_id = row.get("ticket_id")
+    if ticket_id is None:
+        return None
+    ticket_id_str = str(int(ticket_id))
+
+    lines: list[str] = ["Zendesk support ticket"]
+    _append_section(lines, "Ticket ID", ticket_id_str)
+    _append_section(lines, "Created", row.get("created_at"))
+    _append_section(lines, "Channel", row.get("via_channel"))
+    _append_section(lines, "Form type", row.get("ticket_form_name"))
+    _append_section(lines, "Status", row.get("status"))
+    _append_section(lines, "Priority", row.get("priority"))
+    _append_section(lines, "Subject", row.get("subject"))
+
+    description = _clean(row.get("description_preview") or row.get("description"))
+    if description:
+        lines.append(f"Description: {description[:1200]}")
+
+    tags = row.get("tags")
+    if isinstance(tags, list) and tags:
+        tag_text = ", ".join(str(tag) for tag in tags if tag)
+        if tag_text:
+            lines.append(f"Tags: {tag_text[:500]}")
+
+    promoted = row.get("promoted_fields")
+    if isinstance(promoted, dict):
+        for key in sorted(promoted):
+            value = _clean(promoted.get(key))
+            if value:
+                label = str(key).replace("cf_", "").replace("_", " ").strip().title()
+                lines.append(f"{label}: {value[:400]}")
+
+    content = "\n".join(lines)
+    if len(content) < 40:
+        return None
+
+    call_reason = None
+    if isinstance(promoted, dict):
+        for key in (
+            "cf_reason_for_contact_consumer",
+            "cf_reason_for_contact_installerdealer",
+            "cf_reason_for_contact_customer_levolor",
+            "cf_i_need_help_with",
+            "cf_intent",
+        ):
+            call_reason = _clean(promoted.get(key))
+            if call_reason:
+                break
+
+    metadata = {
+        "ticket_id": int(ticket_id),
+        "created_at": _iso_or_none(row.get("created_at")),
+        "via_channel": _clean(row.get("via_channel")),
+        "ticket_form_name": _clean(row.get("ticket_form_name")),
+        "status": _clean(row.get("status")),
+        "call_reason": call_reason,
+    }
+
+    return KnowledgeDocument(
+        chunk_id=f"zendesk:{ticket_id_str}",
+        source_type="zendesk_ticket",
+        source_id=ticket_id_str,
+        interaction_start=_parse_datetime(row.get("created_at")),
+        skill_name=None,
+        primary_reason=call_reason,
+        secondary_reason=None,
+        content=content,
+        metadata=metadata,
+    )
+
+
 def _iso_or_none(value: object | None) -> str | None:
     parsed = _parse_datetime(value)
     return parsed.isoformat() if parsed else None

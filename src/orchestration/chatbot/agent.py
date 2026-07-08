@@ -15,10 +15,17 @@ from orchestration.chatbot.settings import ChatbotSettings
 from orchestration.chatbot.sql_executor import QueryResult, execute_readonly_query, format_results_for_llm
 from orchestration.chatbot.sql_guard import validate_sql
 
-FORM_TYPES_QUERY = (
-    "SELECT DISTINCT ticket_form_name FROM analytics_interactions "
-    "WHERE ticket_form_name IS NOT NULL ORDER BY ticket_form_name"
-)
+FORM_TYPES_QUERY = """
+SELECT DISTINCT ticket_form_name
+FROM (
+    SELECT ticket_form_name FROM analytics_interactions
+    WHERE ticket_form_name IS NOT NULL
+    UNION
+    SELECT ticket_form_name FROM analytics_zendesk_tickets
+    WHERE ticket_form_name IS NOT NULL
+) AS forms
+ORDER BY ticket_form_name
+"""
 from orchestration.analysis.reason_taxonomy import ReasonTaxonomy, load_reason_taxonomy
 from orchestration.db.session import get_engine
 from orchestration.rag.filters import RetrievalFilters, extract_retrieval_filters

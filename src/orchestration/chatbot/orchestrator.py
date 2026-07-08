@@ -257,7 +257,7 @@ def _max_row_count(state: AgentRunState) -> int | None:
 def _rag_chunk_count(state: AgentRunState) -> int:
     total = 0
     for entry in state.tool_results:
-        if entry.tool == "search_interactions":
+        if entry.tool in ("search_interactions", "search_knowledge"):
             total += int(entry.result.get("chunk_count") or 0)
     return total
 

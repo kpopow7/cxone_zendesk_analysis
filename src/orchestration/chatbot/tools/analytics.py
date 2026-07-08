@@ -37,6 +37,12 @@ def _optional_date_filter(days: int | None) -> str:
     return f" AND interaction_start >= NOW() - INTERVAL '{int(days)} days'"
 
 
+def _optional_ticket_form_filter(form_names: list[str]) -> str:
+    if not form_names:
+        return ""
+    return f" AND {_in_list_sql('ticket_form_name', form_names)}"
+
+
 def build_sql_from_intent(
     *,
     intent: str,
@@ -125,9 +131,54 @@ def build_sql_from_intent(
             "SELECT via_channel, COUNT(*) AS ticket_count\n"
             "FROM analytics_zendesk_ticket_channels\n"
             "WHERE via_channel IS NOT NULL"
-            f"{_optional_created_at_filter(days)}\n"
+            f"{_optional_created_at_filter(days)}"
+            f"{_optional_ticket_form_filter(form_names)}\n"
             "GROUP BY via_channel\n"
             "ORDER BY ticket_count DESC\n"
+            f"LIMIT {limit}"
+        )
+
+    if intent_key in ("top_ticket_volume_by_form", "ticket_volume_by_form"):
+        return (
+            "SELECT ticket_form_name, COUNT(*) AS ticket_count\n"
+            "FROM analytics_zendesk_ticket_channels\n"
+            "WHERE ticket_form_name IS NOT NULL"
+            f"{_optional_created_at_filter(days)}"
+            f"{_optional_ticket_form_filter(form_names)}\n"
+            "GROUP BY ticket_form_name\n"
+            "ORDER BY ticket_count DESC\n"
+            f"LIMIT {limit}"
+        )
+
+    if intent_key in ("ticket_count_by_dimension", "ticket_volume_by_dimension"):
+        dim = (dimension or "ticket_form_name").strip()
+        allowed = {"ticket_form_name", "via_channel", "status", "priority"}
+        if dim not in allowed:
+            dim = "ticket_form_name"
+        return (
+            f"SELECT {dim} AS dimension_value, COUNT(*) AS ticket_count\n"
+            "FROM analytics_zendesk_ticket_channels\n"
+            f"WHERE {dim} IS NOT NULL"
+            f"{_optional_created_at_filter(days)}"
+            f"{_optional_ticket_form_filter(form_names)}\n"
+            f"GROUP BY {dim}\n"
+            "ORDER BY ticket_count DESC\n"
+            f"LIMIT {limit}"
+        )
+
+    if intent_key in ("ticket_drilldown", "sample_tickets", "ticket_search"):
+        channel_clause = ""
+        if media_types:
+            channel_clause = f" AND {_in_list_sql('via_channel', media_types)}"
+        return (
+            "SELECT ticket_id, created_at, via_channel, ticket_form_name, status, priority,\n"
+            "       subject, description_preview, tags\n"
+            "FROM analytics_zendesk_ticket_channels\n"
+            "WHERE 1=1"
+            f"{_optional_created_at_filter(days)}"
+            f"{_optional_ticket_form_filter(form_names)}"
+            f"{channel_clause}\n"
+            "ORDER BY created_at DESC\n"
             f"LIMIT {limit}"
         )
 

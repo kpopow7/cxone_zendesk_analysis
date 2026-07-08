@@ -60,3 +60,10 @@ def test_build_sql_ticket_channels_uses_deduped_view() -> None:
     assert "analytics_zendesk_ticket_channels" in sql
     assert "analytics_zendesk_tickets" not in sql
     assert "via_channel" in sql
+
+
+def test_build_sql_ticket_drilldown_uses_zendesk_view() -> None:
+    sql = build_sql_from_intent(intent="ticket_drilldown", days=7, limit=5)
+    assert sql is not None
+    assert "analytics_zendesk_ticket_channels" in sql
+    assert "ticket_id" in sql

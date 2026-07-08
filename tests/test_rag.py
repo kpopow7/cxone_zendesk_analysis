@@ -1,5 +1,30 @@
-from orchestration.rag.documents import build_call_interaction_document
+from orchestration.rag.documents import build_call_interaction_document, build_zendesk_ticket_document
 from orchestration.rag.router import route_question
+
+
+def test_build_zendesk_ticket_document() -> None:
+    document = build_zendesk_ticket_document(
+        {
+            "ticket_id": 12345,
+            "created_at": "2026-05-28T14:00:00+00:00",
+            "via_channel": "mail",
+            "ticket_form_name": "Consumer",
+            "status": "open",
+            "priority": "normal",
+            "subject": "Order status question",
+            "description_preview": "Customer asking where their order is.",
+            "tags": ["email"],
+            "promoted_fields": {
+                "cf_reason_for_contact_consumer": "Order status",
+                "cf_summary": "Customer wants tracking update.",
+            },
+        }
+    )
+    assert document is not None
+    assert document.chunk_id == "zendesk:12345"
+    assert document.source_type == "zendesk_ticket"
+    assert "Order status question" in document.content
+    assert document.metadata["via_channel"] == "mail"
 
 
 def test_build_call_interaction_document() -> None:
