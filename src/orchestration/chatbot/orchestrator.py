@@ -14,6 +14,7 @@ from orchestration.chatbot.agent_state import AgentRunState
 from orchestration.chatbot.memory import ConversationMemory
 from orchestration.chatbot.responses import ChatbotResponse
 from orchestration.chatbot.settings import ChatbotSettings
+from orchestration.chatbot.source_router import classify_question_source
 from orchestration.chatbot.tool_schemas import PLANNER_SYSTEM_PROMPT, TOOL_DEFINITIONS
 from orchestration.chatbot.tools.registry import ToolContext, execute_tool, serialize_tool_result
 from sqlalchemy.engine import Engine
@@ -129,9 +130,15 @@ class AgentOrchestrator:
         memory: ConversationMemory,
         form_types: list[str] | None,
     ) -> str:
+        # Deterministic source routing: decide up front whether this is a call, ticket,
+        # mixed, or all-channel question so the planner stops defaulting to analytics_interactions.
+        route = classify_question_source(
+            memory.contextual_query(question) if memory.has_context() else question
+        )
         parts = [
             f"User question: {question}",
             f"\nConversation so far:\n{memory.as_prompt_context()}",
+            f"\n{route.directive}",
         ]
         if form_types:
             quoted = ", ".join(repr(n) for n in form_types)

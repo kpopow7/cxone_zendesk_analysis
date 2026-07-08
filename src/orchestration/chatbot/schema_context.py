@@ -3,7 +3,16 @@ from __future__ import annotations
 SCHEMA_CONTEXT = """
 You query PostgreSQL for contact-center analytics. Use ONLY the tables/views below.
 
-## Primary table: analytics_interactions (preferred)
+## Choosing a data source (read first)
+- PHONE CALL questions (transcripts, call reasons, agent/skill on calls) → analytics_interactions
+- ZENDESK TICKET questions (email/chat/web volume, ticket status, by channel, ticket form types) →
+  analytics_zendesk_ticket_channels (deduped, no phone bridge) or analytics_zendesk_tickets
+- OVERALL / all-channel contact volume → analytics_zendesk_ticket_channels (covers all channels),
+  NOT analytics_interactions (phone calls only)
+analytics_interactions is NOT the whole dataset — it only contains CXone phone calls linked to a
+parent ticket. Do not use it for email/chat/web tickets or total contact volume.
+
+## analytics_interactions (phone calls only)
 Denormalized CXone calls linked to Zendesk parent tickets. One row per call segment.
 
 Columns:
